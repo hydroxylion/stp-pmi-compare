@@ -1,0 +1,27 @@
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# ---- IDE ----
+.idea/workspace.xml
+.idea/shelf/
+.idea/dictionaries/
+.idea/httpRequests/
+
+# ---- 大体积素材 / 第三方分发物 ----
+SFA-5.50.zip
+*.zip
+NIST.AMS.200-12.pdf
+*.pdf
+
+# ---- 历史备份 ----
+*.bak.py
+* - *版.py
+
+# ---- 运行产物 ----
+*.xlsx
+output/
