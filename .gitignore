@@ -25,3 +25,10 @@ NIST.AMS.200-12.pdf
 # ---- 运行产物 ----
 *.xlsx
 output/
+
+# ---- 回归语料（体积大 / 含内部数据，只保留说明文件） ----
+samples/*
+!samples/README.md
+
+# ---- 诊断产物 ----
+doctor_report.txt

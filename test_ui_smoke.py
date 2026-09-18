@@ -111,6 +111,20 @@ def caption_of(at, must_have):
     return ""
 
 
+def _all_text(at) -> str:
+    """把面板里所有可见文本（caption / markdown / 表格 / 告警）拼起来，便于整体断言。"""
+    parts = [str(c.value) for c in at.caption]
+    parts += [str(m.value) for m in at.markdown]
+    parts += [str(x.value) for x in at.warning]
+    parts += [str(x.value) for x in at.error]
+    for d in at.dataframe:
+        try:
+            parts.append(d.value.to_csv(index=False))
+        except Exception:               # noqa: BLE001
+            parts.append(str(d.value))
+    return "\n".join(parts)
+
+
 def main():
     if not os.path.exists(XLSX):
         print(f"跳过：真值文件不存在 {XLSX}")
@@ -181,18 +195,51 @@ def main():
     check("自检面板 指出 detailData 缺失", "detailData" in errs, errs[:120])
     check("自检面板 指出缺 handle", "handle" in errs, errs[:120])
 
-    # ---------------- SFA 报告自检面板 ----------------
+    # ---------------- 报告体检面板 ----------------
     at.session_state["sfa_stat"] = "语义表 12 项 · draughting_callout 13 条 · 图形标注 13 条（14 列）"
     at.session_state["sfa_warn"] = []
+    at.session_state["sfa_checks"] = [
+        {"name": "ta 列名识别", "ok": True, "value": "表头第 4 行", "detail": ""},
+        {"name": "ta 装载", "ok": True, "value": "13/13 条", "detail": ""},
+    ]
+    at.session_state["sfa_recipes"] = [{
+        "key": "ta", "sheet": "tessellated_annotation_occurren", "header_row": 3,
+        "source": "header", "n_cols": 14, "n_rows": 13, "n_loaded": 13,
+        "resolved": {"id": 0, "name": 1, "associated semantic pmi": 10,
+                     "equivalent unicode string": 13},
+        "notes": [],
+    }]
+    at.session_state["link_stats"] = {"gt-1hop": 3, "none": 0}
+    at.session_state["suspected"] = []
     at.run()
-    check("SFA自检 渲染无异常", not at.exception, [e.value for e in at.exception])
-    check("SFA自检 索引齐全时给出正常态",
-          caption_of(at, "五张索引表齐全") != "", [c.value[:30] for c in at.caption][-4:])
+    check("体检面板 渲染无异常", not at.exception, [e.value for e in at.exception])
+    check("体检面板 全部正常时给出正常态",
+          caption_of(at, "全部正常") != "", [c.value[:40] for c in at.caption][:8])
+    check("体检面板 展示列定位（含列来源）",
+          "表头识别" in _all_text(at), _all_text(at)[:140])
+    check("体检面板 展示交叉校验项",
+          "ta 列名识别" in _all_text(at), _all_text(at)[:140])
+    check("体检面板 展示关联路径分布",
+          "关联路径" in _all_text(at), _all_text(at)[:140])
 
-    _w = ("tessellated_annotation_occurrence 表仅 12 列，缺 `Equivalent Unicode String(s)`")
+    # 断链 + 疑似对应：面板应转为「发现问题」并列出候选
+    at.session_state["link_stats"] = {"gt-1hop": 1, "none": 2}
+    at.session_state["suspected"] = [{
+        "开发条目": "MBD_X#1", "标题": "A", "name": "Simple Datum.1",
+        "疑似对应": "Simple Datum.1（name 完全一致，关联本应成功）"}]
+    at.run()
+    check("体检面板 断链时渲染无异常", not at.exception, [e.value for e in at.exception])
+    check("体检面板 断链时标为需要关注",
+          caption_of(at, "需要关注") != "", [c.value[:40] for c in at.caption][:8])
+    check("体检面板 疑似对应入表",
+          "疑似对应" in _all_text(at), _all_text(at)[:140])
+    check("体检面板 疑似对应不产生 error 污染结果",
+          not any("Simple Datum" in e.value for e in at.error), [e.value[:40] for e in at.error])
+
+    _w = "tessellated_annotation_occurrence 未提供 `Equivalent Unicode String(s)`"
     at.session_state["sfa_warn"] = [_w]
     at.run()
-    check("SFA自检 有告警时逐条展示",
+    check("体检面板 有告警时逐条展示",
           [_w] == [x.value for x in at.warning if x.value == _w], [x.value[:40] for x in at.warning])
 
     print()

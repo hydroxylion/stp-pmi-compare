@@ -69,7 +69,10 @@ KIND_LAYER = {
 
 # ta 表列数阈值：col11=Associated Semantic PMI（关联键），col14=Equivalent Unicode String（图形文本）。
 # 导出勾选不同会导致列数在 11~14 之间浮动，缺 col14 时图形文本通道为空但不影响关联。
-TA_COL_MIN_LINK = 11    # 关联所需最小列数（到 Associated Semantic PMI 为止）
+# 加载期交叉校验阈值：tessellated 表 col10 的引用应几乎全部能落地
+# （落语义表 / 经 dcr 映射 / 经 datum-2hop）。低于此值说明该列已不是
+# `Associated Semantic PMI`，或该表的列序变了。
+TA_REF_MIN_HIT = 0.8
 
 # SFA 语义表里实体类型 -> 条目类别
 def classify_sfa_entity(entity: str) -> str:
@@ -97,6 +100,11 @@ SYMBOL_MAP = {
     "卤": "±", "±": "±",
     "×": "X", "✕": "X",
     "⭩◎": "", "◎": "",
+    # SFA 把「统计公差」符号渲染成字体私有区字形 U+F055（同一份报告里
+    # 另一种写法是 `<ST>`）。不映射等于丢掉修饰符。
+    "\uf055": "ST",
+    # 指向性尺寸的指向符号、注释里单独出现的图形符号：非公差符号，忽略
+    "↧": "", "⌴": "",
 }
 
 _CJK = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
@@ -388,6 +396,11 @@ _SYM_ALIAS = {"⊥": "⟂", "⏊": "⟂", "⊿": "⌓", "⫽": "∥", "⏥": "�
 # 收录会造成「缺符号 ◎」假报。
 _FCF_CHARS = set("⌓⌖⟂∥▱⏥⌭⌯−")
 _DIA_CHARS = set("⌀")
+# SFA 文本化标注区块时用的排版字形：分隔、填充、区块标记，**不是** GD&T 符号。
+# 不能收录进 _FCF_CHARS —— 收录会让「缺符号」检查把它们当成必须出现的符号而误报
+# （实测 `▽`/`⎹` 各出现 15 次，全在带基准的 FCF 里、与 `[A]` 同行，属版面元素）。
+# 这里登记只为让 doctor 不再把它们报成「未收录字符」，保留对真新字符的发现能力。
+SFA_LAYOUT_GLYPHS = set("▽⎹◁⌮◎⭩")
 _RAD_PREFIX = re.compile(r"(?<![A-Za-z])R\s*(?=[.\d])")
 _SR_PREFIX = re.compile(r"(?<![A-Za-z])S\s*(?=[⌀.])")
 # 数量前缀可能不在串首（SFA 图形文本形如 `DIM | 4X ⌀.250`），也常用 `×` 而非 `X`
@@ -531,6 +544,122 @@ def dev_defects(it: "DevItem", view: str = "", *, dup: bool = False,
 # SFA 真值层
 # --------------------------------------------------------------------------
 @dataclass
+class ColRecipe:
+    """一张 SFA 表的列定位结果。
+
+    `mapping` 是「规范化列名 -> 列号」，`source` 说明定位方式：
+    `header` = 从表头行读出（可靠）；`fallback` = 未识别表头，退回默认列号（脆弱）。
+    """
+    key: str = ""                       # 逻辑表名，如 "ta" / "semantic"
+    sheet: str = ""                     # 实际工作表名
+    header_row: int = -1                # 表头所在行（-1 表示没找到）
+    source: str = "header"              # header | fallback
+    mapping: Dict[str, int] = field(default_factory=dict)
+    resolved: Dict[str, int] = field(default_factory=dict)   # 需要用的字段 -> 列号
+    n_cols: int = 0
+    n_rows: int = 0                     # 该表 ID 列为数字的数据行数
+    n_loaded: int = 0                   # 实际装载条数
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def trustworthy(self) -> bool:
+        return self.source == "header"
+
+
+@dataclass
+class IntegrityCheck:
+    """加载期交叉校验项。不依赖列语义，只依赖「读到没有 / 数量对不对」。"""
+    name: str = ""
+    ok: bool = True
+    detail: str = ""
+    value: str = ""
+
+    def line(self) -> str:
+        return f"[{'ok' if self.ok else '!!'}] {self.name}：{self.value}" + (
+            f"（{self.detail}）" if self.detail else "")
+
+
+def _norm_header(v: Any) -> str:
+    """表头规范化：取首行（SFA 把 `(Sec. x)` 说明放在第二行）、去括号注释、压空白、小写。"""
+    s = str(v or "").replace("\r", "\n")
+    s = s.split("\n")[0]
+    s = re.sub(r"\(.*?\)", " ", s)
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _resolve_col(hmap: Dict[str, int], alias: str) -> Optional[int]:
+    """在列名映射里解析别名：先精确相等，再前缀匹配（取最靠左的列）。
+
+    前缀匹配是为了兼容 `Similar PMI / Exception` 这类带后缀的表头；
+    精确优先是为了避免 `dimension` 误命中 `dimensional`。
+    """
+    a = alias.lower()
+    if a in hmap:
+        return hmap[a]
+    for h, j in hmap.items():
+        if h.startswith(a):
+            return j
+    return None
+
+
+def _find_header_row(rows: List[List[str]], aliases: Sequence[str],
+                     scan: int = 8) -> Tuple[int, Dict[str, int]]:
+    """在前 scan 行里找表头行：取命中所需别名最多的那一行。
+
+    SFA 的表的列名位置并不固定（语义表在 r2，tessellated/dcr 在 r3，
+    且 r2 常是 Excel 生成的 `列1..列N` 占位行），所以必须扫描而不是写死行号。
+    至少命中 2 个别名才认，避免把占位行误判成表头。
+    """
+    best_i, best_hit, best_map = -1, 0, {}
+    for i, r in enumerate(rows[:scan]):
+        m: Dict[str, int] = {}
+        for j, cell in enumerate(r):
+            h = _norm_header(cell)
+            if h and h not in m:
+                m[h] = j
+        hit = sum(1 for a in aliases if _resolve_col(m, a) is not None)
+        if hit > best_hit:
+            best_i, best_hit, best_map = i, hit, m
+    if best_hit >= 2:
+        return best_i, best_map
+    return -1, {}
+
+
+def _locate(rows: List[List[str]], aliases: Sequence[str],
+            wants: Sequence[str], defaults: Sequence[int]) -> ColRecipe:
+    """定位一张表的列：优先按表头列名，失败则按默认列号回落。"""
+    hi, hmap = _find_header_row(rows, aliases)
+    cr = ColRecipe(header_row=hi, mapping=hmap, n_cols=max((len(r) for r in rows), default=0))
+    if hi >= 0:
+        for a, d in zip(wants, defaults):
+            j = _resolve_col(hmap, a)
+            cr.resolved[a] = d if j is None else j
+            if j is None:
+                cr.notes.append(f"表头未见 `{a}`，按默认列号 {d} 取")
+    else:
+        cr.source = "fallback"
+        cr.resolved = {a: d for a, d in zip(wants, defaults)}
+        cr.notes.append("未识别到表头行，按默认列号取（结构变化时可能静默失配）")
+    return cr
+
+
+# 各表所需的列别名（与默认列号，仅在识别不到表头时使用）
+SEM_ALIASES, SEM_WANTS, SEM_DEFAULT = (
+    ("id", "entity", "semantic pmi", "similar pmi"),
+    ("id", "entity", "semantic pmi", "similar pmi"),
+    (0, 1, 2, 3),
+)
+DC_ALIASES, DC_WANTS, DC_DEFAULT = (("id", "name"), ("id", "name"), (0, 1))
+TA_ALIASES = ("id", "name", "associated semantic pmi", "equivalent unicode string",
+              "validation properties")
+TA_WANTS, TA_DEFAULT = ("id", "name", "associated semantic pmi",
+                        "equivalent unicode string"), (0, 1, 10, 13)
+DATUM_ALIASES, DATUM_WANTS, DATUM_DEFAULT = (
+    ("id", "identification"), ("id", "identification"), (0, 5))
+DCR_ALIASES, DCR_WANTS, DCR_DEFAULT = (("id", "dimension"), ("id", "dimension"), (0, 1))
+
+
+@dataclass
 class SfaTruth:
     path: str = ""
     units: str = ""
@@ -543,6 +672,17 @@ class SfaTruth:
     sheets: List[str] = field(default_factory=list)
     sentinel_row: Optional[int] = None
     warnings: List[str] = field(default_factory=list)
+    recipes: List["ColRecipe"] = field(default_factory=list)            # 每张表的列定位结果
+    checks: List["IntegrityCheck"] = field(default_factory=list)        # 加载期交叉校验
+
+    def recipe(self, key: str) -> Optional["ColRecipe"]:
+        for r in self.recipes:
+            if r.key == key:
+                return r
+        return None
+
+    def broken_checks(self) -> List["IntegrityCheck"]:
+        return [c for c in self.checks if not c.ok]
 
 
 _REF_ID = re.compile(r"(?<![\d.])(\d{4,7})(?![\d.])")
@@ -569,92 +709,213 @@ def _pick_sheet(names: Sequence[str], prefix: str) -> Optional[str]:
     return None
 
 
+def _pick_exact(names: Sequence[str], name: str) -> Optional[str]:
+    """精确匹配表名。用于 `datum` 这类前缀会误命中 `datum_system` 的场景。"""
+    low = name.strip().lower()
+    for n in names:
+        if n.strip().lower() == low:
+            return n
+    return None
+
+
+def _cell(r: List[str], j: Optional[int]) -> str:
+    """安全取列：列号越界或缺失一律返回空串，不抛异常。"""
+    if j is None or j < 0 or j >= len(r):
+        return ""
+    return r[j]
+
+
+def _open_table(wb, t: SfaTruth, key: str, prefix: str, aliases: Sequence[str],
+                wants: Sequence[str], defaults: Sequence[int],
+                search: Sequence[str] = ()) -> Tuple[Optional[List[List[str]]], Optional[ColRecipe]]:
+    """定位工作表并解析表头列名，返回 (数据行, 列定位结果)。
+
+    `search` 是备用表名前缀（SFA 不同版本里同一张表可能叫不同名字）。
+    """
+    sname = _pick_exact(t.sheets, prefix) or _pick_sheet(t.sheets, prefix)
+    for alt in search:
+        if not sname:
+            sname = _pick_sheet(t.sheets, alt)
+    if not sname:
+        t.warnings.append(f"未找到 `{prefix}` 表")
+        return None, None
+    rows = _rows(wb[sname])
+    cr = _locate(rows, aliases, wants, defaults)
+    cr.key, cr.sheet = key, sname
+    id_col = cr.resolved.get("id", 0)
+    cr.n_rows = sum(1 for r in rows if _cell(r, id_col).isdigit())
+    t.recipes.append(cr)
+    return rows, cr
+
+
 def load_sfa(path: str) -> SfaTruth:
-    """读取 SFA 报告，建立 ID 索引。"""
+    """读取 SFA 报告，建立 ID 索引。
+
+    列位置一律**按表头列名定位**，不写死列号。SFA 的列数与列序随版本和导出勾选变化
+    （实测 tessellated 表 12~14 列、dcr 表 17~20 列），写死列号会造成静默失配 ——
+    曾经因此整表被跳过，结果表全判「多余 / 缺失」。
+    识别不到表头时才退回默认列号，并在 recipe.notes 与 warnings 里显式说明。
+    """
     t = SfaTruth(path=path)
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     t.sheets = list(wb.sheetnames)
 
+    def col(cr: Optional[ColRecipe], name: str) -> Optional[int]:
+        return cr.resolved.get(name) if cr else None
+
     # --- 1. Semantic PMI Summary：语义真值
-    sname = _pick_sheet(t.sheets, "Semantic PMI Summary") or _pick_sheet(t.sheets, "Semantic PMI Summ")
-    if not sname:
-        t.warnings.append("未找到语义表（Semantic PMI Summary）")
-    else:
-        for i, r in enumerate(_rows(wb[sname])):
-            if len(r) >= 3 and r[2] == "Expected PMI":
+    rows, cr = _open_table(wb, t, "semantic", "Semantic PMI Summary", SEM_ALIASES,
+                           SEM_WANTS, SEM_DEFAULT, search=("Semantic PMI Summ",))
+    if rows is not None:
+        c_id, c_ent = col(cr, "id"), col(cr, "entity")
+        c_txt, c_sim = col(cr, "semantic pmi"), col(cr, "similar pmi")
+        for i, r in enumerate(rows):
+            if _cell(r, c_txt) == "Expected PMI":
                 t.sentinel_row = i + 1
                 break
-        for r in _rows(wb[sname]):
-            if len(r) >= 3 and r[0].isdigit() and r[2] not in ("", "Expected PMI"):
-                t.semantic[int(r[0])] = {
-                    "id": int(r[0]), "entity": r[1], "text": r[2],
-                    "similar": r[3] if len(r) > 3 else "",
-                    "kind": classify_sfa_entity(r[1]),
+        for r in rows:
+            rid, txt = _cell(r, c_id), _cell(r, c_txt)
+            if rid.isdigit() and txt not in ("", "Expected PMI"):
+                t.semantic[int(rid)] = {
+                    "id": int(rid), "entity": _cell(r, c_ent), "text": txt,
+                    "similar": _cell(r, c_sim),
+                    "kind": classify_sfa_entity(_cell(r, c_ent)),
                 }
+        if cr:
+            cr.n_loaded = len(t.semantic)
 
     # --- 2. draughting_callout：handle <-> name
-    sname = _pick_sheet(t.sheets, "draughting_callout")
-    if sname:
-        for r in _rows(wb[sname]):
-            if len(r) >= 2 and r[0].isdigit():
-                t.dc[int(r[0])] = r[1]
-    else:
-        t.warnings.append("未找到 draughting_callout 表")
+    rows, cr = _open_table(wb, t, "dc", "draughting_callout", DC_ALIASES,
+                           DC_WANTS, DC_DEFAULT)
+    if rows is not None:
+        c_id, c_nm = col(cr, "id"), col(cr, "name")
+        for r in rows:
+            rid = _cell(r, c_id)
+            if rid.isdigit():
+                t.dc[int(rid)] = _cell(r, c_nm)
+        if cr:
+            cr.n_loaded = len(t.dc)
 
     # --- 3. tessellated_annotation_occurrence：name -> 语义引用 + 图形文本
-    # 注意：列数随 SFA 导出勾选而变。关联键只需到 col11（Associated Semantic PMI），
-    # col14（Equivalent Unicode String）是图形文本通道，缺失时降级为空，不能因此整表跳过。
-    sname = _pick_sheet(t.sheets, "tessellated_annotation_occurren")
-    if not sname:
-        t.warnings.append("未找到 tessellated_annotation_occurrence 表（图形 PMI 通道缺失）")
+    rows, cr = _open_table(wb, t, "ta", "tessellated_annotation_occurren", TA_ALIASES,
+                           TA_WANTS, TA_DEFAULT)
+    if rows is None:
+        t.warnings.append("tessellated_annotation_occurrence 表缺失（图形 PMI 通道不可用）")
     else:
-        rows_ta = _rows(wb[sname])
-        n_cols = max((len(r) for r in rows_ta), default=0)
-        t.ta_cols = n_cols
-        for r in rows_ta:
-            if len(r) >= TA_COL_MIN_LINK and r[0].isdigit():
-                refs = _ref_ids(r[10])
-                t.ta[r[1]] = {
-                    "id": int(r[0]),
-                    "ta_name": r[1],
-                    "sem_refs": refs,
-                    "sem_ref_raw": r[10],
-                    "text": r[13] if len(r) > 13 else "",
+        c_id, c_nm = col(cr, "id"), col(cr, "name")
+        c_ref, c_uni = col(cr, "associated semantic pmi"), col(cr, "equivalent unicode string")
+        t.ta_cols = cr.n_cols if cr else 0
+        for r in rows:
+            rid, nm = _cell(r, c_id), _cell(r, c_nm)
+            if rid.isdigit() and nm:
+                raw = _cell(r, c_ref)
+                t.ta[nm] = {
+                    "id": int(rid), "ta_name": nm,
+                    "sem_refs": _ref_ids(raw), "sem_ref_raw": raw,
+                    "text": _cell(r, c_uni),
                 }
+        if cr:
+            cr.n_loaded = len(t.ta)
         if t.ta and not any(v.get("text") for v in t.ta.values()):
             t.warnings.append(
-                f"tessellated_annotation_occurrence 表仅 {n_cols} 列，缺 "
-                "`Equivalent Unicode String(s)`（图形文本通道），关联不受影响但"
-                "「SFA图形文本」列将为空。内容比对已回落到语义表文本；"
+                "tessellated_annotation_occurrence 未提供 `Equivalent Unicode String(s)`"
+                "（图形文本通道），「SFA图形文本」列将为空，内容比对已回落到语义表文本。"
                 "如需按图纸上实际呈现的字形比对，请在 SFA 导出时勾选该列。")
 
     # --- 4. datum：基准标识
-    sname = _pick_sheet(t.sheets, "datum")
-    if sname and sname != _pick_sheet(t.sheets, "datum_system"):
-        for r in _rows(wb[sname]):
-            if len(r) >= 6 and r[0].isdigit():
-                t.datum[int(r[0])] = {"id": int(r[0]), "identification": r[5]}
+    rows, cr = _open_table(wb, t, "datum", "datum", DATUM_ALIASES,
+                           DATUM_WANTS, DATUM_DEFAULT)
+    if rows is not None and cr is not None:
+        if "system" in cr.sheet.lower():
+            t.warnings.append(f"`datum` 表命中 `{cr.sheet}`（疑似 datum_system），已跳过该表")
+            t.recipes.remove(cr)
+        else:
+            c_id, c_ident = col(cr, "id"), col(cr, "identification")
+            for r in rows:
+                rid = _cell(r, c_id)
+                if rid.isdigit():
+                    t.datum[int(rid)] = {"id": int(rid), "identification": _cell(r, c_ident)}
+            cr.n_loaded = len(t.datum)
 
     # --- 5. dimensional_characteristic_representation：尺寸的第 2 跳
-    sname = _pick_sheet(t.sheets, "dimensional_characteristic_repr")
-    if sname:
-        for r in _rows(wb[sname]):
-            if len(r) >= 2 and r[0].isdigit():
-                refs = _ref_ids(r[1])
-                for rid in refs:
-                    t.dcr_by_dim[rid] = int(r[0])
+    rows, cr = _open_table(wb, t, "dcr", "dimensional_characteristic_repr", DCR_ALIASES,
+                           DCR_WANTS, DCR_DEFAULT)
+    if rows is not None:
+        c_id, c_dim = col(cr, "id"), col(cr, "dimension")
+        for r in rows:
+            rid = _cell(r, c_id)
+            if rid.isdigit():
+                for ref in _ref_ids(_cell(r, c_dim)):
+                    t.dcr_by_dim[ref] = int(rid)
+        if cr:
+            cr.n_loaded = len(t.dcr_by_dim)
 
-    # --- 单位
+    # --- 6. 单位
     hname = _pick_sheet(t.sheets, "Header")
     if hname:
         for r in _rows(wb[hname]):
-            joined = " ".join(r)
-            m = re.search(r"\b(INCH|MM|MILLIMETRE|METER)\b", joined, re.I)
+            m = re.search(r"\b(INCH|MM|MILLIMETRE|METER)\b", " ".join(r), re.I)
             if m:
                 t.units = m.group(1).upper()
                 break
     wb.close()
+
+    _integrity_checks(t)
     return t
+
+
+def _integrity_checks(t: SfaTruth) -> None:
+    """加载后交叉校验：只看「读到没有、数量对不对、引用能否落地」，不依赖列语义。
+
+    价值在于把「静默失配」变成显式告警：结构变了导致整表被跳过时，
+    装载条数会与表内数据行数严重不符，比结果表全红更早暴露问题。
+    """
+    def add(name: str, ok: bool, value: str, detail: str = "") -> None:
+        t.checks.append(IntegrityCheck(name=name, ok=ok, value=value, detail=detail))
+
+    for cr in t.recipes:
+        if cr.trustworthy:
+            add(f"{cr.sheet} 列名识别", True, f"表头第 {cr.header_row + 1} 行")
+        else:
+            add(f"{cr.sheet} 列名识别", False, "退回默认列号，结构变化时会静默失配")
+
+    for cr in t.recipes:
+        if cr.n_rows == 0:
+            add(f"{cr.sheet} 装载", False, "表内无可识别的数据行")
+        elif cr.n_loaded == 0:
+            add(f"{cr.sheet} 装载", False, f"表内 {cr.n_rows} 行、装载 0 条",
+                "整表被跳过：列定位与代码预期不符")
+        elif cr.n_loaded < cr.n_rows * 0.5:
+            add(f"{cr.sheet} 装载", False,
+                f"表内 {cr.n_rows} 行、仅装载 {cr.n_loaded} 条", "疑似列定位错位")
+        else:
+            add(f"{cr.sheet} 装载", True, f"{cr.n_loaded}/{cr.n_rows} 条")
+
+    if t.ta:
+        # 引用分三类可落地：直接落语义表 / 经 dcr 映射（尺寸）/ 经 datum-2hop（基准）。
+        # 只看「三类都解释不了」的比例 —— 拿「能落进语义表」当分子会把正常的
+        # 尺寸类引用算成异常（实测仅 54%），阈值形同虚设。
+        total = 0
+        explained = 0
+        for v in t.ta.values():
+            for r in v["sem_refs"]:
+                total += 1
+                if r in t.semantic or r in t.dcr_by_dim or (r - 1) in t.datum:
+                    explained += 1
+        ratio = explained / total if total else 1.0
+        add("ta 引用可解释", ratio >= TA_REF_MIN_HIT,
+            f"{explained}/{total} = {ratio:.0%}" if total else "无引用",
+            "有引用既不在语义表、也不在 dcr/datum 索引里，说明该列已不是 "
+            "Associated Semantic PMI，或语义表 ID 体系不同"
+            if total and ratio < TA_REF_MIN_HIT else "")
+
+    if t.dc and t.ta:
+        dcn = {v for v in t.dc.values() if v}
+        common = len(dcn & set(t.ta))
+        add("dc 与 ta 的 name 对应", common >= len(dcn) * 0.5,
+            f"{common}/{len(dcn)}",
+            "对应率过低说明两张表不是同一套标注"
+            if common < len(dcn) * 0.5 else "")
 
 
 # --------------------------------------------------------------------------
@@ -1012,6 +1273,103 @@ def it_view(it: DevItem, t: SfaTruth) -> str:
     return " ".join(segs)
 
 
+@dataclass
+class SuspectLink:
+    """一条关联失败条目的「疑似对应」提示。
+
+    **只用于诊断展示**：不进结果表、不进任何指标分子分母。
+    模糊匹配一旦参与判定，指标就不再是「ID 精确关联」的口径了。
+    """
+    key: str = ""
+    title: str = ""
+    name: str = ""
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
+
+    def text(self) -> str:
+        return " / ".join(f"{c['ta_name']}（{c['why']}）" for c in self.candidates)
+
+
+def link_stats(rows: Sequence[MatchRow]) -> Dict[str, int]:
+    """关联路径分布。开发侧几乎全为 `none` = 关联链断裂，而不是数据对不上。"""
+    out: Dict[str, int] = {}
+    for r in rows:
+        out[r.path] = out.get(r.path, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
+def _fold_name(s: str) -> str:
+    return re.sub(r"[\s_\-]+", "", str(s or "")).lower()
+
+
+def _strip_seq(s: str) -> str:
+    return re.sub(r"\.\d+$", "", _fold_name(s))
+
+
+def suspect_links(items: Sequence[DevItem], t: SfaTruth,
+                  rows: Sequence[MatchRow], limit: int = 3) -> List[SuspectLink]:
+    """对关联路径为 none 的开发条目，给出可能的对应关系。
+
+    依次尝试：name 完全一致 → 规范化一致 → 去掉末尾序号一致 → 数值指纹重叠。
+    仅用于体检面板展示，便于判断「是名字对不上还是整条链断了」。
+    """
+    broken = {r.key.split("@")[0] for r in rows if r.path == "none"}
+    if not broken or not t.ta:
+        return []
+    by_fold: Dict[str, List[str]] = {}
+    by_base: Dict[str, List[str]] = {}
+    for nm in t.ta:
+        by_fold.setdefault(_fold_name(nm), []).append(nm)
+        by_base.setdefault(_strip_seq(nm), []).append(nm)
+
+    # 预先算好每个 ta 的数值指纹，避免在内层循环里重复解析
+    ta_nums: Dict[str, set] = {}
+    for nm, info in t.ta.items():
+        text = " ".join(str(t.semantic[r]["text"]) for r in info["sem_refs"]
+                        if r in t.semantic) or str(info.get("text") or "")
+        ta_nums[nm] = set(sem_tokens(text, [])["numbers"]) if text else set()
+
+    out: List[SuspectLink] = []
+    for it in items:
+        if it.raw not in broken:
+            continue
+        cands: List[Dict[str, Any]] = []
+        seen: set = set()
+
+        def push(ta_name: str, why: str, score: float) -> None:
+            if ta_name in seen:
+                return
+            seen.add(ta_name)
+            cands.append({"ta_name": ta_name, "why": why, "score": score})
+
+        if it.name:
+            if it.name in t.ta:
+                push(it.name, "name 完全一致，关联本应成功", 1.0)
+            for nm in by_fold.get(_fold_name(it.name), []):
+                push(nm, "name 规范化后一致", 0.9)
+            for nm in by_base.get(_strip_seq(it.name), []):
+                push(nm, "name 去掉末尾序号后一致", 0.7)
+
+        if len(cands) < limit:
+            dev_num = set(sem_tokens(it.title, [])["numbers"])
+            if dev_num:
+                scored = []
+                for nm, sn in ta_nums.items():
+                    if nm in seen or not sn:
+                        continue
+                    j = len(dev_num & sn) / len(dev_num | sn)
+                    if j >= 0.6:
+                        scored.append((j, nm))
+                scored.sort(reverse=True)
+                for j, nm in scored[:limit - len(cands)]:
+                    push(nm, f"数值指纹重叠 {j:.0%}", round(j, 2))
+
+        if cands:
+            cands.sort(key=lambda c: -c["score"])
+            out.append(SuspectLink(key=it.raw, title=it.title, name=it.name,
+                                   candidates=cands[:limit]))
+    return out
+
+
 def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
     """按实体 ID 精确关联，产出比对行。"""
     rows: List[MatchRow] = []
@@ -1262,12 +1620,15 @@ def compute_metrics(rows: Sequence[MatchRow], verdicts: Optional[Dict[str, str]]
 
 def summarize(rows: Sequence[MatchRow], t: SfaTruth, items: Sequence[DevItem]) -> Dict[str, Any]:
     m = compute_metrics(rows)
+    paths = link_stats(rows)
     return {
         "开发条目": len(items),
         "SFA语义项": len(t.semantic),
         "SFA表数": len(t.sheets),
         "关联覆盖率": (sum(1 for r in rows if r.path in ("gt-1hop", "dim-2hop", "datum-2hop"))
                    / max(1, len([x for x in items if x.kind != KIND_NOTE])) * 100),
+        "关联路径分布": paths,
+        "断链条目": paths.get("none", 0),
         "语义_应提取": m.sem_expected,
         "语义_已提取": m.sem_extracted,
         "语义_命中": m.sem_hit,

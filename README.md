@@ -28,11 +28,11 @@ md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurre
 | datum | `ta.col11` 末尾形貌 ID − 1 → `datum.ID` → `datum.identification` | 2 |
 | datum_target | `ta.col11` 直接给出 `datum_target` 实体 ID → 语义表 ID | 1 |
 
-> `ta` = `tessellated_annotation_occurrence`，关联键只用到它的 **第 11 列
-> `Associated Semantic PMI`**。第 14 列 `Equivalent Unicode String(s)` 是图形文本通道，
-> 属于可选列：**缺它不影响关联**，只是「SFA图形文本」列会为空、内容比对回落到语义表文本。
-> 导出时勾上该列可获得最精确的按字形比对。历史上装载器把列数写死为 `>= 14`，
-> 缺列时整张表被静默跳过，表现为「一条都没对上」——现已改为按各列实际用途分别校验。
+> `ta` = `tessellated_annotation_occurrence`。**列位置一律按表头列名定位，不写死列号** ——
+> SFA 的列数与列序会随版本和导出勾选变化（实测 `ta` 表 12~14 列、`dcr` 表 17~20 列）。
+> 关联键用 `Associated Semantic PMI` 列；`Equivalent Unicode String(s)` 是图形文本通道，
+> 属可选列：**缺它不影响关联**，只是「SFA图形文本」列会为空、内容比对回落到语义表文本。
+> 导出时勾上该列可获得最精确的按字形比对。
 
 ## 排查「一条都没对上」
 
@@ -54,11 +54,49 @@ md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurre
 ```json 围栏；JSON 字段名 `handle`/`name` 大小写不敏感。但**标题行必须**匹配
 `^###\s+序号[.、]标题$`（如 `### 1. Simple Datum.1`）。
 
-**②「🧭 SFA 报告自检」—— SFA 侧**
+**②「🧭 报告体检」—— SFA 侧 + 关联链**
 
-展示五张索引表的装载条数与列数（语义表 / draughting_callout / 图形标注 /
-datum / dcr），并在索引表缺列、缺表时给出告警。索引表不全会让关联链整段断掉，
-而表面上看起来和「开发侧没解析出来」一模一样。
+一个面板四段，把「工具读到了什么、列是怎么认的、哪一环断了」全部摊开：
+
+| 段 | 内容 |
+|---|---|
+| ① 装载与列定位 | 每张表的列数、表头行、**用到的列是怎么定位的**；来源显示「默认列号（脆弱）」说明该表没识别出表头 |
+| ② 交叉校验 | 表内数据行数 vs 实际装载条数、`ta` 引用能否落地、`dc` 与 `ta` 的 name 是否一一对应 |
+| ③ 关联路径分布 | `gt-1hop / dim-2hop / datum-2hop / datum_target-1hop / none` 各多少条 |
+| ④ 疑似对应 | 关联失败条目的模糊匹配候选，**仅供参考，不进任何指标** |
+
+## 结构变化不会静默失配
+
+数据侧的演进是无限的（SFA 换版本、换导出勾选、不同测试件、开发侧生成器改版），
+所以不能只靠"把已知问题修掉"。本工具用三层把「静默失配」变成「显式告警」：
+
+**① 列名驱动装载** — 表头列名其实就在表里（`ta` 表在 r3、其余表在 r2，带换行与
+`(Sec. x)` 后缀），一律按列名定位。识别不到表头才退回默认列号，并把该表标为不可信。
+
+**② 加载期交叉校验** — 不依赖列语义，只看「读到没有、数量对不对、引用能否落地」：
+
+- 表内数据行数 vs 装载条数（整表被跳过时直接报出，比结果表全红更早）
+- `ta` 引用中「既不在语义表、也不在 dcr / datum 索引」的比例
+- `dc` 的 name 与 `ta` 的 name 对应率
+
+**③ 一键诊断包** — 结果不对劲时跑一次，把完整上下文写成一份文件：
+
+```bash
+python doctor.py <SFA报告.xlsx> [开发markdown]
+# 同时打印并写入 doctor_report.txt
+```
+
+输出包含：环境与依赖版本、全部工作表、每张关键表的原始前 5 行与列定位结果、
+ID 索引规模、交叉校验逐项结果、装载告警、**未收录字符清单**、markdown 解析自检、
+关联路径分布、三项指标、缺陷清单、疑似对应、全部非命中条目。
+
+> 「未收录字符」这一段专门用来看 SFA 有没有引入新的字形。但要区分两类：
+> 真公差符号（如 `⌭` 圆柱度、`⌯` 对称度、`−` 直线度）要补进符号表；
+> **SFA 的排版字形**（`▽` `⎹` `⭩` `◁` `⌮` `◎`）**不能**补 —— 它们在带基准的
+> 框架里与 `[A]` 同行，属版面元素，收进符号表会让「缺符号」检查误报一片。
+
+**遗留的两类无法根治，只能保证快速发现**：新 GD&T 符号与渲染字形（白名单机制）、
+开发侧 markdown 格式演进（解析自检会显式报出，不再静默全红）。
 
 ## 内容比对的分段口径
 
@@ -143,8 +181,11 @@ PyCharm 中直接运行 `pmi_compare_work.py` 也可以 —— 脚本内置 bare
 ```
 pmi_core.py            比对内核：真值装载 / markdown 解析 / 归一化 / ID 关联 / 指标 / 缺陷检测
 pmi_compare_work.py    Streamlit 界面（当前主入口）
-test_pmi_core.py       回归测试（135 项：指标口径、关联链路、缺陷检测、解析自检、列数容错）
-test_ui_smoke.py       界面冒烟测试（22 项：AppTest 无头跑渲染分支 + 列口径 + 自检面板断言）
+doctor.py              一键诊断：结果不对劲时跑一次，产出完整上下文报告
+test_pmi_core.py       内核回归（161 项：指标口径、关联链路、缺陷检测、解析自检、列名驱动）
+test_ui_smoke.py       界面冒烟（29 项：AppTest 无头跑渲染分支 + 列口径 + 两个诊断面板）
+test_realdata.py       真实数据回归（锁端到端数值，语料缺失自动跳过）
+samples/               真实语料目录（不进版本控制，见 samples/README.md）
 streamlit_launcher.py  启动器（规避 IDE 运行配置序列化差异）
 pmi_compare.py         早期版本，留档
 ```
@@ -152,10 +193,15 @@ pmi_compare.py         早期版本，留档
 ## 测试
 
 ```bash
-python test_pmi_core.py          # 内核回归：指标口径、关联链路、缺陷检测、解析自检、列数容错
-python test_ui_smoke.py          # 界面冒烟：精简/完整视图、列口径、筛选切换、两个自检面板
+python test_pmi_core.py          # 内核回归：口径、链路、缺陷、解析自检、列名驱动与交叉校验
+python test_ui_smoke.py          # 界面冒烟：视图列口径、筛选、两个诊断面板
 python test_ui_smoke.py <xlsx>   # 也可指定真值报告路径
+python test_realdata.py          # 真实数据回归（需 samples/ 与 SFA 报告，缺失自动跳过）
+python doctor.py <xlsx> [md]     # 出问题时的一键诊断（不是测试，是排查工具）
 ```
+
+> `test_pmi_core.py` 的列名驱动用例是**现场用 openpyxl 构造**的报告（列序全部打乱、
+> 表头带换行与 `(Sec. x)`），不依赖外部数据文件，可离线跑。
 
 ## 环境
 

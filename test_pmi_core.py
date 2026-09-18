@@ -509,6 +509,223 @@ check("符号 直线度符已收录", C.symbols_of("− | 0.2 / 15"), {"−"})
 check("符号 圆柱度符已收录", C.symbols_of("⌭ | 0.1"), {"⌭"})
 check("符号 杂符 ⭩◎ 不计入", C.symbols_of("⭩◎ | ⌓ | 1.5"), {"⌓"})
 
+# SFA 把统计公差渲染成字体私有区字形 U+F055（同一份报告里另一种写法是 `<ST>`），
+# 认不出就等于丢掉修饰符
+check("符号 私有区 ST 字形归一化为 ST", C.normalize("\uf055"), "ST")
+check("符号 指向符号 ↧ 被剔除", "↧" in C.normalize("DIM | ↧.30±.02"), False)
+check("符号 注释杂符 ⌴ 被剔除", C.normalize("⌴"), "")
+# ▽ / ⎹ 出现在带基准框架里、与 [A] 同行，属 SFA 版面元素；
+# 混进公差符号集会让「缺符号」检查误报一片
+check("符号 排版字形不混入公差符号集",
+      C.symbols_of("▽ ⎹ ⌓ | 1.2 | A"), {"⌓"})
+check("符号 排版字形已登记", {"▽", "⎹"} <= C.SFA_LAYOUT_GLYPHS, True)
+
+
+# ============================================================
+# 五、列名驱动装载 / 加载期交叉校验 / 断链候选
+#     覆盖本次事故的同源根因：装载器只认列号，列数或列序一变就静默失配
+#     （曾整张 tessellated 表被跳过 -> 结果全判「多余 / 缺失」）。
+#     表头列名其实就在表里（带换行与 (Sec. x) 后缀），以前从来没读。
+# ============================================================
+def _build_sfa_shuffled(tmpdir: str) -> str:
+    """列序全部打乱 + 表头带换行与 (Sec. x) 后缀的报告。
+
+    若装载器仍按列号取，ref 会落到空列、关联全断；按列名定位则应完全正常。
+    """
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    ws = wb.create_sheet("Semantic PMI Summary")
+    ws.append(["Semantic PMI Summary (3)", None, None, None])
+    # 表头带换行与章节号；Expected PMI 被挪到第 4 列
+    ws.append(["Entity\n(Sec. 2.1)", "ID", "Similar PMI / Exception", "Semantic PMI"])
+    for rid, ent, txt in [(2001, "position_tolerance", "⌖ | ⌀0.8 | A | B"),
+                          (3001, "flatness_tolerance", "▱ | 0.2"),
+                          (4001, "dimensional_size", "⌀6.00 ± 0.15")]:
+        ws.append([ent, str(rid), None, txt])
+
+    ws = wb.create_sheet("draughting_callout")
+    ws.append(["draughting_callout  (3)", None])
+    ws.append(["name", "ID"])                       # 列序反转
+    for rid, nm in [(1101, "Position.1"), (1201, "Flatness.1"), (1301, "Linear Size.1")]:
+        ws.append([nm, str(rid)])
+
+    ws = wb.create_sheet("tessellated_annotation_occurren")
+    ws.append(["tessellated_annotation_occurrence  (3)"] + [None] * 4)
+    ws.append(["列1", "列2", "列3", "列4", "列5"])    # Excel 占位行，须跳过
+    ws.append(["ID", "name", "Associated Semantic PMI (Sec. 7.3)", "styles",
+               "Equivalent Unicode String(s)\n(Sec. 10.1.3.3)"])
+    for rid, nm, ref, uni in [
+        (1100, "Position.1", "position_tolerance 2001", "⌖ | ⌀0.8 | A | B"),
+        (1200, "Flatness.1", "flatness_tolerance 3001", "▱ | 0.2"),
+        (1300, "Linear Size.1", "dimensional_size 5001", "⌀6.00 ± 0.15"),
+    ]:
+        ws.append([str(rid), nm, ref, "", uni])
+
+    ws = wb.create_sheet("dimensional_characteristic_repr")
+    ws.append(["dimensional_characteristic_representation  (1)"] + [None] * 2)
+    ws.append(["ID", "dimension (Sec. 5.1.1)", "Associated Geometry"])
+    ws.append(["4001", "dimensional_size 5001", "x"])
+
+    path = os.path.join(tmpdir, "shuffled_sfa.xlsx")
+    wb.save(path)
+    return path
+
+
+def _build_sfa_noheader(tmpdir: str) -> str:
+    """ta 表没有可用表头（只有 Excel 占位行），且 ref 列不在默认位置。
+
+    期望：退回默认列号、标记为不可信、交叉校验报出来 —— 而不是静默失配。
+    """
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    ws = wb.create_sheet("Semantic PMI Summary")
+    ws.append(["Semantic PMI Summary (1)", None, None, None])
+    ws.append(["ID", "Entity", "Semantic PMI", "Similar"])
+    ws.append(["2001", "position_tolerance", "⌖ | ⌀0.8 | A | B", None])
+
+    ws = wb.create_sheet("draughting_callout")
+    ws.append(["draughting_callout  (1)", None])
+    ws.append(["ID", "name"])
+    ws.append(["1101", "Position.1"])
+
+    ws = wb.create_sheet("tessellated_annotation_occurren")
+    ws.append(["tessellated_annotation_occurrence  (1)"] + [None] * 4)
+    ws.append(["列1", "列2", "列3", "列4", "列5"])     # 唯一「表头」就是占位行
+    ws.append(["1100", "Position.1", "", "position_tolerance 2001", ""])
+
+    path = os.path.join(tmpdir, "noheader_sfa.xlsx")
+    wb.save(path)
+    return path
+
+
+def _build_sfa_nonumeric(tmpdir: str) -> str:
+    """模拟本次事故形态：ta 表 ID 列读不出数字，整表装载为 0。
+
+    期望：交叉校验直接报「无可识别的数据行」，而不是等到结果表全红才发现。
+    """
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    ws = wb.create_sheet("Semantic PMI Summary")
+    ws.append(["Semantic PMI Summary (1)", None, None, None])
+    ws.append(["ID", "Entity", "Semantic PMI", "Similar"])
+    ws.append(["2001", "position_tolerance", "⌖ | ⌀0.8 | A | B", None])
+
+    ws = wb.create_sheet("draughting_callout")
+    ws.append(["draughting_callout  (1)", None])
+    ws.append(["ID", "name"])
+    ws.append(["1101", "Position.1"])
+
+    ws = wb.create_sheet("tessellated_annotation_occurren")
+    ws.append(["tessellated_annotation_occurrence  (1)"] + [None] * 11)
+    ws.append(["ID", "name", "styles", "item", "name", "children", "presentation style",
+               "color", "plane", "Associated Geometry", "Associated Semantic PMI",
+               "Saved Views"])
+    # ID 带 `#` 前缀 -> isdigit() 为假 -> 整表装载 0
+    ws.append(["#1100", "Position.1", "", "", "", "", "", "", "", "",
+               "position_tolerance 2001", ""])
+
+    path = os.path.join(tmpdir, "nonumeric_sfa.xlsx")
+    wb.save(path)
+    return path
+
+
+_MD_SHUFFLED = """# PMI 提取结果
+
+## MBD_Y
+
+- 标注数量：3 条
+
+### 1. ⌖ Ø.8 A B
+
+detailData:
+{
+  "handle": "1101",
+  "name": "Position.1",
+  "type": "position_tolerance"
+}
+
+### 2. ⏥ .2
+
+detailData:
+{
+  "handle": "1201",
+  "name": "Flatness.1",
+  "type": "flatness_tolerance"
+}
+
+### 3. Ø6.00 ±.15
+
+detailData:
+{
+  "handle": "1301",
+  "name": "Linear Size.1",
+  "type": "dimensional_size"
+}
+"""
+
+with tempfile.TemporaryDirectory() as _td_sh:
+    _sh = C.load_sfa(_build_sfa_shuffled(_td_sh))
+_sh_items, _ = C.parse_dev_markdown_ex(_MD_SHUFFLED)
+_sh_rows = C.match_items(_sh, _sh_items)
+_sh_m = C.compute_metrics(_sh_rows)
+
+check("列序打乱 语义表仍装载 3 项", len(_sh.semantic), 3)
+check("列序打乱 dc 表 ID/name 反转仍装载", len(_sh.dc), 3)
+check("列序打乱 ta 表 ref 列挪位仍装载", len(_sh.ta), 3)
+check("列序打乱 dcr 表仍装载", len(_sh.dcr_by_dim), 1)
+check("列序打乱 语义表定位到 Semantic PMI 列",
+      _sh.recipe("semantic").resolved["semantic pmi"], 3)
+check("列序打乱 dc 定位到 name=0 / id=1",
+      (_sh.recipe("dc").resolved["name"], _sh.recipe("dc").resolved["id"]), (0, 1))
+check("列序打乱 ta 定位到 ref 列 2",
+      _sh.recipe("ta").resolved["associated semantic pmi"], 2)
+check("列序打乱 ta 识别出 Unicode 列",
+      _sh.recipe("ta").resolved["equivalent unicode string"], 4)
+check("列序打乱 每张表都按表头识别（无 fallback）",
+      sorted({r.source for r in _sh.recipes}), ["header"])
+check("列序打乱 交叉校验全通过", [b.line() for b in _sh.broken_checks()], [])
+check("列序打乱 召回 100", _sh_m.recall, 100.0)
+check("列序打乱 精确 100", _sh_m.precision, 100.0)
+check("列序打乱 无断链条目", C.link_stats(_sh_rows).get("none", 0), 0)
+
+with tempfile.TemporaryDirectory() as _td_nh:
+    _nh = C.load_sfa(_build_sfa_noheader(_td_nh))
+check("无表头 ta 定位不可信", _nh.recipe("ta").trustworthy, False)
+check("无表头 ta 仍装载（不静默跳过整表）", len(_nh.ta), 1)
+check("无表头 ta ref 取空（关联会失效）", _nh.ta["Position.1"]["sem_refs"], [])
+check("无表头 交叉校验报出列名未识别",
+      any("列名识别" in b.name for b in _nh.broken_checks()), True)
+check("无表头 语义表不受影响、仍可靠",
+      _nh.recipe("semantic").trustworthy, True)
+
+with tempfile.TemporaryDirectory() as _td_ne:
+    _ne = C.load_sfa(_build_sfa_nonumeric(_td_ne))
+check("ID 非数字 ta 装载 0 条", len(_ne.ta), 0)
+check("ID 非数字 交叉校验报出无可识别数据行",
+      any("无可识别的数据行" in b.value for b in _ne.broken_checks()), True)
+
+# 断链候选：只提示、不参与判定
+_MD_TYPO = _MD_SHUFFLED.replace('"name": "Position.1"', '"name": "Position.11"')
+_tp_items, _ = C.parse_dev_markdown_ex(_MD_TYPO)
+_tp_rows = C.match_items(_sh, _tp_items)
+_tp_m = C.compute_metrics(_tp_rows)
+_sus = C.suspect_links(_tp_items, _sh, _tp_rows)
+
+check("断链候选 关联确已断裂", C.link_stats(_tp_rows).get("none", 0), 1)
+check("断链候选 给出候选", len(_sus), 1)
+check("断链候选 指向正确条目",
+      [c["ta_name"] for c in _sus[0].candidates] if _sus else [], ["Position.1"])
+check("断链候选 判定未被改写（条目仍判多余）", _tp_m.sem_extra >= 1, True)
+check("断链候选 判定未被改写（对端仍判缺失）", _tp_m.sem_miss >= 1, True)
+check("断链候选 正常数据下不产生噪音",
+      C.suspect_links(_sh_items, _sh, _sh_rows), [])
+
 
 # ============================================================
 # 汇总

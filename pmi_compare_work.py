@@ -456,7 +456,8 @@ def calculate_metrics_with_verdicts(df, verdicts):
 import pmi_core as core
 
 _STATE = {"rows": None, "verdicts": {}, "meta": {}, "dev_raw": "",
-          "sfa_warn": [], "sfa_stat": ""}
+          "sfa_warn": [], "sfa_stat": "", "sfa_checks": [], "sfa_recipes": [],
+          "suspected": [], "link_stats": {}}
 for _k, _v in _STATE.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -570,6 +571,20 @@ if st.button("🚀 开始比对", type="primary"):
                     f"图形标注 {len(truth.ta)} 条（{truth.ta_cols} 列） · "
                     f"datum {len(truth.datum)} 项 · dcr {len(truth.dcr_by_dim)} 项"
                 )
+                st.session_state.sfa_checks = [ck.__dict__ for ck in truth.checks]
+                st.session_state.sfa_recipes = [
+                    {"key": cr.key, "sheet": cr.sheet, "header_row": cr.header_row,
+                     "source": cr.source, "n_cols": cr.n_cols, "n_rows": cr.n_rows,
+                     "n_loaded": cr.n_loaded, "resolved": cr.resolved, "notes": cr.notes}
+                    for cr in truth.recipes
+                ]
+                st.session_state.link_stats = core.link_stats(rows)
+                st.session_state.suspected = [
+                    {"开发条目": sl.key, "标题": sl.title, "name": sl.name,
+                     "疑似对应": " / ".join(
+                         f"{c['ta_name']}（{c['why']}）" for c in sl.candidates)}
+                    for sl in core.suspect_links(items, truth, rows)
+                ]
                 st.rerun()
 
 # ---------------------------- 解析自检 ----------------------------
@@ -615,27 +630,86 @@ if raw_now.strip():
             "JSON 字段名须为小写 `handle` / `name` / `type`。"
         )
 
-# ---------------------------- SFA 报告自检 ----------------------------
-# 关联链断在 SFA 侧时（索引表缺列 / 缺表）同样会表现为「一条都没对上」，
-# 这里把五张索引表的装载结果与告警显式暴露出来。
+# ---------------------------- 报告体检 ----------------------------
+# 关联链断在 SFA 侧（索引表缺列 / 缺表 / 列序变）与开发侧解析失败的表象完全一样，
+# 这里把「装载了什么、列是怎么定位的、引用能不能落地、哪一环断了」一次摊开。
 _sfa_stat = st.session_state.get("sfa_stat") or ""
 _sfa_warn = list(st.session_state.get("sfa_warn") or [])
-if _sfa_stat:
+_checks = list(st.session_state.get("sfa_checks") or [])
+_recs = list(st.session_state.get("sfa_recipes") or [])
+_linkstats = dict(st.session_state.get("link_stats") or {})
+_suspected = list(st.session_state.get("suspected") or [])
+_bad_checks = [c for c in _checks if not c.get("ok")]
+
+if _sfa_stat or _checks:
+    _problems = len(_bad_checks) + len(_sfa_warn) + len(_suspected) + _linkstats.get("none", 0)
     with st.expander(
-        "🧭 SFA 报告自检 —— " + ("⚠️ 有提示" if _sfa_warn else "✅ 索引齐全")
-        + f"　（{_sfa_stat}）",
-        expanded=bool(_sfa_warn),
+        "🧭 报告体检 —— " + ("⚠️ 发现问题" if _problems else "✅ 全部正常")
+        + f"　（{_sfa_stat or '未装载'}）",
+        expanded=bool(_problems),
     ):
+        st.caption("体检结论：" + ("全部正常" if not _problems else
+                                 f"发现 {_problems} 处需要关注 —— 校验不通过 "
+                                 f"{len(_bad_checks)} · 装载告警 {len(_sfa_warn)} · "
+                                 f"关联断裂 {_linkstats.get('none', 0)} · "
+                                 f"疑似对应 {len(_suspected)}"))
         for _w in _sfa_warn:
             st.warning(_w)
-        if not _sfa_warn:
-            st.caption("五张索引表齐全，图形通道与语义通道均可用。")
+
+        st.markdown("**① 装载与列定位**")
         st.caption(
-            "ID 关联靠三张表打通：`draughting_callout.ID`(＝开发侧 handle) → "
-            "`tessellated_annotation_occurrence.第11列` → 语义表 ID。"
-            "其中 GT 1 跳、DIM 经 `dimensional_characteristic_repr` 2 跳、"
-            "基准 2 跳、基准目标 1 跳。"
+            "列位置一律按表头列名定位，不写死列号 —— SFA 的列数与列序会随版本和"
+            "导出勾选变化。「列来源」显示 *默认列号（脆弱）* 时，该表没识别出表头，"
+            "列序一变就会静默失配。"
         )
+        if _recs:
+            st.dataframe(pd.DataFrame([{
+                "表": r["sheet"],
+                "列来源": "表头识别" if r["source"] == "header" else "默认列号（脆弱）",
+                "表头行": (r["header_row"] + 1) if r["header_row"] >= 0 else "—",
+                "列数": r["n_cols"],
+                "数据行": r["n_rows"],
+                "装载": r["n_loaded"],
+                "用到的列": " · ".join(f"{k}={v}" for k, v in r["resolved"].items()),
+                "备注": "；".join(r["notes"]),
+            } for r in _recs]), hide_index=True, width="stretch")
+
+        if _checks:
+            st.markdown("**② 交叉校验**")
+            st.caption(
+                "不依赖列语义，只看「读到没有、数量对不对、引用能否落地」。"
+                "结构变化导致整表被跳过时，这里会先于结果表报警。"
+            )
+            st.dataframe(pd.DataFrame([{
+                "校验项": c["name"], "结果": "✅" if c["ok"] else "❌",
+                "值": c["value"], "说明": c["detail"],
+            } for c in _checks]), hide_index=True, width="stretch")
+
+        if _linkstats:
+            st.markdown("**③ 关联路径分布**")
+            st.caption(
+                "`none` 表示该条目没能关联到任何 SFA 语义实体。"
+                "开发侧几乎全是 `none` = 关联链断裂，而不是两边数据真的对不上。"
+            )
+            st.dataframe(pd.DataFrame(
+                [{"关联路径": k, "条数": v} for k, v in _linkstats.items()]),
+                hide_index=True, width="stretch")
+
+        if _suspected:
+            st.markdown("**④ 疑似对应（仅供参考，不参与判定）**")
+            st.caption(
+                "对关联失败条目做的模糊匹配，**不计入任何指标分子分母**，"
+                "仅用于判断是「名字对不上」还是「整条链断了」。"
+            )
+            st.dataframe(pd.DataFrame(_suspected), hide_index=True, width="stretch")
+
+        if not _problems:
+            st.caption(
+                "ID 关联靠三张表打通：`draughting_callout.ID`（＝开发侧 handle）→ "
+                "`tessellated_annotation_occurrence` 的 `Associated Semantic PMI` 列 → 语义表 ID。"
+                "其中 GT 1 跳、DIM 经 `dimensional_characteristic_repr` 2 跳、"
+                "基准 2 跳、基准目标 1 跳。"
+            )
 
 # ---------------------------- 结果 ----------------------------
 if st.session_state.rows:
@@ -652,7 +726,8 @@ if st.session_state.rows:
             f"开发侧 {len(_dev_rows)} 条**全部**判为「⚠️ 多余」，同时 SFA 侧大量判为「❌ 缺失」"
             "——这是 **ID 关联链没建立** 的典型特征，而不是两边数据真的对不上。"
             "两处根因按顺序排查：① 展开「🔎 解析自检」看 handle/name 有没有解析出来；"
-            "② 展开「🧭 SFA 报告自检」看索引表是否齐全。"
+            "② 展开「🧭 报告体检」看装载、列定位与关联路径分布，"
+            "其中「疑似对应」能直接区分是名字对不上还是整条链断了。"
         )
 
     f1, f2, f3 = st.columns(3)
