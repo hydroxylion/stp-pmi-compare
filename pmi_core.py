@@ -67,6 +67,10 @@ KIND_LAYER = {
     KIND_NOTE: LAYER_NOTE,
 }
 
+# ta 表列数阈值：col11=Associated Semantic PMI（关联键），col14=Equivalent Unicode String（图形文本）。
+# 导出勾选不同会导致列数在 11~14 之间浮动，缺 col14 时图形文本通道为空但不影响关联。
+TA_COL_MIN_LINK = 11    # 关联所需最小列数（到 Associated Semantic PMI 为止）
+
 # SFA 语义表里实体类型 -> 条目类别
 def classify_sfa_entity(entity: str) -> str:
     e = (entity or "").strip()
@@ -226,32 +230,58 @@ def normalize(text: str, *, keep_sep: bool = True) -> str:
     return s.strip()
 
 
-_FCF_SYM = re.compile(r"[⌓⌖⟂∥▱⏊⏥⫽]")
+_FCF_SYM = re.compile(r"[⌓⌖⟂∥▱⏥⌭⌯−]")
+# SFA 图形/语义通道把 FCF 行渲染成 `⌖ | ⌀0.8 | D | B | C`（用 | 分隔），
+# 尺寸行则是 `2X ⌀5.50 ± 0.2`。同一语义行可能同时含尺寸行与 FCF 行，
+# 用 | 作判据比枚举符号稳（新增符号不会漏判）。
+_FCF_SEP = re.compile(r"\|")
 _MOD_WORDS = {
     "MAXIMUM_MATERIAL": "M", "LEAST_MATERIAL": "L",
     "STATISTICAL_TOLERANCE": "ST", "PROJECTED": "P", "FREE_STATE": "F",
 }
 
 
+_MOD_CHARS = re.compile(r"[ⓂⓁⓅⓊⓈ]")
+_MOD_GLYPH = {"Ⓜ": "M", "Ⓛ": "L", "Ⓟ": "P", "Ⓤ": "U", "Ⓢ": "ST"}
+_STD_MODS = ("M", "L", "P", "ST", "U", "F")
+# 数量前缀可能不在串首（SFA 图形通道形如 `DIM | 4X ⌀.250`），也常用 `×` 而非 `X`
+_COUNT_ANY = re.compile(r"(?:^|[\s|])(\d+)\s*[Xx×✕](?![0-9A-Za-z])")
+
+
+def _letters_of(text: str) -> List[str]:
+    return sorted(set(re.findall(r"(?<![A-Za-z])([A-Z])(?![A-Za-z])", text)))
+
+
 def sem_tokens(text: str, extra_mods: Iterable[str] = ()) -> Dict[str, Any]:
     """抽取语义指纹：数值集合 + 基准字母 + 修饰符 + 数量前缀。
 
-    数量前缀（`4X`）从数值集合中剔除，单独用 count 字段比较。
+    三条要点（都是为了让两侧表示差异不产生假判定）：
+    - 数量前缀（`4X`）从数值与字母集合中整体剔除，单独用 count 字段比较，
+      否则 `2X` 的 `X` 会被当成基准字母，报出「开发侧未呈现基准」这种假差异。
+    - 修饰符优先从字形（`Ⓜ Ⓛ Ⓟ Ⓤ Ⓢ`）识别：开发侧写 `EⓂ-FⓂ-GⓂ`、SFA 写
+      `E Ⓜ-F Ⓜ-G Ⓜ`，字形紧跟字母，纯字母启发式会漏掉修饰符。
+    - 基准字母抽取**不做**字母剔除（`L` 既可能是基准字母也可能是 LMC 修饰符），
+      修饰符与基准字母的消歧放到 compare_tokens 里对两侧对称处理。
     """
-    s = normalize(text, keep_sep=False)
-    cnt_m = re.match(r"^\s*(\d+)\s*[Xx]\b", s)
-    count = int(cnt_m.group(1)) if cnt_m else None
-    body = s[cnt_m.end():] if cnt_m else s
+    raw = str(text or "")
+    s = normalize(raw, keep_sep=False)
+    m_cnt = _COUNT_ANY.search(s)
+    count = int(m_cnt.group(1)) if m_cnt else None
+    body = _COUNT_ANY.sub(" ", s)
     nums = sorted({norm_number(x) for x in _NUM.findall(body)})
-    letters = sorted(set(re.findall(r"(?<![A-Za-z])([A-Z])(?![A-Za-z])", s)))
-    # 修饰符用「非字母」边界匹配：`Ø.015Ⓟ.425` 归一化后是 `D0.015P0.425`，
-    # 用 \b 会漏掉（P 两侧都是数字，仍属 word 字符）。
-    mods = {m for m in ("M", "L", "P", "ST", "U", "F")
-            if re.search(rf"(?<![A-Za-z]){m}(?![A-Za-z])", s)}
+
+    glyph_mods = {v for c, v in _MOD_GLYPH.items() if c in raw}
+    mods = set(glyph_mods)
+    if not glyph_mods:
+        # 无字形时退回字母启发式（含自由状态 F、投影 P 等以字母书写的情况）
+        mods |= {m for m in _STD_MODS
+                 if re.search(rf"(?<![A-Za-z]){m}(?![A-Za-z])", s)}
     mods |= set(extra_mods)
+
+    bare = _COUNT_ANY.sub(" ", normalize(_MOD_CHARS.sub(" ", raw), keep_sep=False))
     return {
         "numbers": nums,
-        "letters": letters,
+        "letters": _letters_of(bare),
         "modifiers": sorted(mods),
         "count": count,
         "norm": s,
@@ -271,29 +301,40 @@ def dev_extra_mods(it: "DevItem") -> List[str]:
 
 
 def sfa_text_for(text: str, kind: str) -> str:
-    """从 SFA 语义文本中取用于比对的片段。
+    """从 SFA 语义文本中取用于比对的片段。**返回原文，不做归一化**。
 
-    GT 类语义文本常把「尺寸行 + FCF 行 + 修饰行」合并，只取含公差符号的行。
-    DIM 类尺寸描述可能折行（如 `⌀0.250 +.003` + `-.000`），需合并全部行。
+    一条语义行可能把「尺寸行 + FCF 行 + 修饰行」合并在一起（如
+    `3X ⌀3.50 ± 0.2\\n⌭ | 0.1`），而这两行是图纸上两个不同的标注。
+    GT 只取 FCF 行，判据优先用 `|` 分隔符（SFA 固定渲染方式），
+    退回符号表、再退回首行。DIM 类尺寸描述可能折行，合并全部行。
+
+    必须返回原文：修饰符（`Ⓜ`）、直径符（`⌀`）等字形一旦归一化就丢失，
+    后续 sem_tokens / symbols_of 只能靠字形判定修饰符与符号，不可提前转换。
     """
     lines = [l for l in (text or "").split("\n") if l.strip()]
     if not lines:
         return ""
     if kind == KIND_GT:
-        fcf = [l for l in lines if _FCF_SYM.search(l)]
-        if fcf:
-            return " ".join(fcf[:1])
-        return normalize(lines[0], keep_sep=False)
-    return normalize(" ".join(lines), keep_sep=False)
+        fcf = [l for l in lines if _FCF_SEP.search(l)]
+        if not fcf:
+            fcf = [l for l in lines if _FCF_SYM.search(l)]
+        return fcf[0].strip() if fcf else lines[0].strip()
+    return " ".join(l.strip() for l in lines)
 
 
 def compare_tokens(dev: Dict[str, Any], sfa: Dict[str, Any]) -> Tuple[str, str]:
     """返回 (状态, 备注)。
 
     子集关系一律视为「ID 已确认一致，仅呈现完整度不同」；只有集合冲突才判疑似。
+
+    基准字母比较前，先从两侧**对称地**剔除已识别的修饰符字母：`L` 既可能是
+    基准字母也可能是 LMC 修饰符（如标题 `⌖ Ø0 H K L` 里的 L 同时是基准与 Ⓛ），
+    不做对称剔除会产出「开发侧未呈现基准」这类假判定。剔除只损失区分度，
+    不会制造冲突。
     """
+    all_mods = set(dev["modifiers"]) | set(sfa["modifiers"])
     dn, sn = set(dev["numbers"]), set(sfa["numbers"])
-    dl, sl = set(dev["letters"]), set(sfa["letters"])
+    dl, sl = set(dev["letters"]) - all_mods, set(sfa["letters"]) - all_mods
     dm, sm = set(dev["modifiers"]), set(sfa["modifiers"])
     cnt_note = (f"；数量前缀 {dev['count'] or '-'}× vs {sfa['count'] or '-'}×"
                 if dev["count"] != sfa["count"] else "")
@@ -340,8 +381,12 @@ DEFECT_CODES = (DF_ENC, DF_EMPTY, DF_CNT, DF_SYM, DF_NUM, DF_MAP, DF_DUP)
 
 # 符号归一化别名（仅用于缺陷比对，不改变正文归一化口径）
 _SYM_ALIAS = {"⊥": "⟂", "⏊": "⟂", "⊿": "⌓", "⫽": "∥", "⏥": "▱",
-              "∅": "⌀", "Ø": "⌀", "Φ": "⌀", "φ": "⌀", "ø": "⌀"}
-_FCF_CHARS = set("⌓⌖⟂∥▱⏥")
+              "∅": "⌀", "Ø": "⌀", "Φ": "⌀", "φ": "⌀", "ø": "⌀", "⭩": ""}
+# GD&T 符号全集（SFA 语义/图形通道实际用到的形位公差符号）。
+# 直线度在 SFA 里渲染为 U+2212 `−`（全报告仅此一处出现，不与负号混淆）。
+# 不收录 `◎`：SFA 把它写成 `⭩◎` 这类渲染产物（SYMBOL_MAP 里已判为杂符），
+# 收录会造成「缺符号 ◎」假报。
+_FCF_CHARS = set("⌓⌖⟂∥▱⏥⌭⌯−")
 _DIA_CHARS = set("⌀")
 _RAD_PREFIX = re.compile(r"(?<![A-Za-z])R\s*(?=[.\d])")
 _SR_PREFIX = re.compile(r"(?<![A-Za-z])S\s*(?=[⌀.])")
@@ -493,6 +538,7 @@ class SfaTruth:
     datum: Dict[int, Dict[str, Any]] = field(default_factory=dict)      # datum.ID -> item
     dc: Dict[int, str] = field(default_factory=dict)                    # draughting_callout.ID -> name
     ta: Dict[str, Dict[str, Any]] = field(default_factory=dict)         # name -> {id, sem_refs, text}
+    ta_cols: int = 0                                                    # ta 表实际列数（图形文本通道判定）
     dcr_by_dim: Dict[int, int] = field(default_factory=dict)            # dimensional_*.ID -> dcr.ID
     sheets: List[str] = field(default_factory=list)
     sentinel_row: Optional[int] = None
@@ -556,20 +602,31 @@ def load_sfa(path: str) -> SfaTruth:
         t.warnings.append("未找到 draughting_callout 表")
 
     # --- 3. tessellated_annotation_occurrence：name -> 语义引用 + 图形文本
+    # 注意：列数随 SFA 导出勾选而变。关联键只需到 col11（Associated Semantic PMI），
+    # col14（Equivalent Unicode String）是图形文本通道，缺失时降级为空，不能因此整表跳过。
     sname = _pick_sheet(t.sheets, "tessellated_annotation_occurren")
     if not sname:
         t.warnings.append("未找到 tessellated_annotation_occurrence 表（图形 PMI 通道缺失）")
     else:
-        for r in _rows(wb[sname]):
-            if len(r) >= 14 and r[0].isdigit():
+        rows_ta = _rows(wb[sname])
+        n_cols = max((len(r) for r in rows_ta), default=0)
+        t.ta_cols = n_cols
+        for r in rows_ta:
+            if len(r) >= TA_COL_MIN_LINK and r[0].isdigit():
                 refs = _ref_ids(r[10])
                 t.ta[r[1]] = {
                     "id": int(r[0]),
                     "ta_name": r[1],
                     "sem_refs": refs,
                     "sem_ref_raw": r[10],
-                    "text": r[13],
+                    "text": r[13] if len(r) > 13 else "",
                 }
+        if t.ta and not any(v.get("text") for v in t.ta.values()):
+            t.warnings.append(
+                f"tessellated_annotation_occurrence 表仅 {n_cols} 列，缺 "
+                "`Equivalent Unicode String(s)`（图形文本通道），关联不受影响但"
+                "「SFA图形文本」列将为空。内容比对已回落到语义表文本；"
+                "如需按图纸上实际呈现的字形比对，请在 SFA 导出时勾选该列。")
 
     # --- 4. datum：基准标识
     sname = _pick_sheet(t.sheets, "datum")
@@ -915,7 +972,11 @@ def _lookup_semantic_for_dev(it: DevItem, t: SfaTruth) -> Tuple[List[int], str]:
         return ids, ("dim-2hop" if ids else "none")
 
     if it.kind == KIND_DATUM:
-        # col11 里 datum_feature / shape_aspect 的 ID，datum.ID = 该 ID - 1
+        # 基准目标（datum_target）：col11 直接给出 datum_target 实体 ID，1 跳
+        # 普通基准：col11 里 datum_feature / shape_aspect 的 ID，datum.ID = 该 ID - 1，2 跳
+        for r in refs:
+            if t.semantic.get(r, {}).get("entity") == "datum_target":
+                return [r], "datum_target-1hop"
         for r in refs:
             if (r - 1) in t.datum:
                 return [r - 1], "datum-2hop"
@@ -925,18 +986,30 @@ def _lookup_semantic_for_dev(it: DevItem, t: SfaTruth) -> Tuple[List[int], str]:
 
 
 def it_view(it: DevItem, t: SfaTruth) -> str:
-    """SFA 侧对应条目的「可呈现文本」：优先图形通道（图纸上实际画的字），
-    缺则回落语义通道。注释类不做内容比对（标题只是元素名，比不出缺陷）。"""
+    """SFA 侧对应条目的「可呈现文本」，用于缺陷检测的内容比对。
+
+    优先图形通道（图纸上实际画的字，一条标注一条文本，最准）；
+    缺则回落语义通道，且必须**按片段取**——语义行常把尺寸行与 FCF 行揉在一起，
+    直接拿整行会导致「缺数值 / 数量前缀不符」大面积误报。
+    复合公差（一条开发标注对应多个语义实体）时把各片段合并，避免只比到一段。
+    """
     if it.kind == KIND_NOTE:
         return ""
     ta = t.ta.get(it.name)
     if ta and ta.get("text"):
         return str(ta["text"])
     ids, _ = _lookup_semantic_for_dev(it, t)
+    segs: List[str] = []
     for sid in ids:
-        if sid in t.semantic:
-            return str(t.semantic[sid]["text"])
-    return ""
+        s = t.semantic.get(sid)
+        if not s:
+            continue
+        seg = sfa_text_for(s["text"], it.kind) or str(s["text"])
+        if seg:
+            segs.append(seg)
+    # 原样返回（保留 ⌀ / Ⓜ / ⌖ 等字形）：symbols_of 按字形判定符号，
+    # 归一化会把 ⌀ 变成 D 从而丢掉符号，导致「缺符号」漏报。
+    return " ".join(segs)
 
 
 def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
@@ -1003,16 +1076,32 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
             sub.key = f"{key}@{sid}"      # 复合公差一条开发标注可能映射多个语义实体
             sub.sfa_sem_id = sid
             if it.kind == KIND_DATUM:
-                ident = str(t.datum.get(sid, {}).get("identification", "") or "")
+                ent = t.semantic.get(sid, {}).get("entity", "")
                 dev_ident = str(it.detail.get("datum", "") or "")
-                sub.sfa_entity = "datum"
-                sub.sfa_text = ident
-                if ident and ident == dev_ident:
-                    sub.status, sub.remark = ST_HIT, "ID 关联 + 基准标识一致"
+                if ent == "datum_target":
+                    # 语义表文本形如 `K1 (area)`，基准目标标识 = 基准字母 + 目标序号
+                    tid = str(it.detail.get("target id", "") or "")
+                    expect = f"{dev_ident}{tid}"
+                    seg = sfa_text_for(t.semantic[sid]["text"], KIND_DATUM) or \
+                        normalize(t.semantic[sid]["text"])
+                    sub.sfa_entity, sub.sfa_text = ent, seg
+                    ident = (seg.split() or [""])[0]
+                    if expect and ident.startswith(expect):
+                        sub.status, sub.remark = ST_HIT, "ID 关联 + 基准目标标识一致"
+                    else:
+                        sub.status = ST_SUSPECT
+                        sub.remark = f"基准目标标识差异：开发={expect or '-'} SFA={ident or '-'}"
                 else:
-                    sub.status = ST_SUSPECT
-                    sub.remark = f"基准标识差异：开发={dev_ident or '-'} SFA={ident or '-'}"
+                    ident = str(t.datum.get(sid, {}).get("identification", "") or "")
+                    sub.sfa_entity = "datum"
+                    sub.sfa_text = ident
+                    if ident and ident == dev_ident:
+                        sub.status, sub.remark = ST_HIT, "ID 关联 + 基准标识一致"
+                    else:
+                        sub.status = ST_SUSPECT
+                        sub.remark = f"基准标识差异：开发={dev_ident or '-'} SFA={ident or '-'}"
                 used_sem[("datum", sid)] = key
+                used_sem[sid] = key
                 rows.append(sub)
                 continue
             sub.sfa_entity = t.semantic[sid]["entity"]
@@ -1042,6 +1131,14 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
     # 反向：语义表有、开发侧无
     for sid, s in t.semantic.items():
         if sid in used_sem:
+            continue
+        if s["entity"] == "datum_target":
+            rows.append(MatchRow(
+                key=f"SFA-datum-target#{sid}", layer=LAYER_DATUM, kind=KIND_DATUM,
+                sfa_sem_id=sid, sfa_text=normalize(s["text"]), sfa_entity=s["entity"],
+                status=ST_MISS, path="reverse",
+                remark="SFA 有该基准目标，开发侧未提取",
+            ))
             continue
         if s["kind"] == "datum_system":
             rows.append(MatchRow(

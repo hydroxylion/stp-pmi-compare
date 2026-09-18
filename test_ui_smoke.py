@@ -181,6 +181,20 @@ def main():
     check("自检面板 指出 detailData 缺失", "detailData" in errs, errs[:120])
     check("自检面板 指出缺 handle", "handle" in errs, errs[:120])
 
+    # ---------------- SFA 报告自检面板 ----------------
+    at.session_state["sfa_stat"] = "语义表 12 项 · draughting_callout 13 条 · 图形标注 13 条（14 列）"
+    at.session_state["sfa_warn"] = []
+    at.run()
+    check("SFA自检 渲染无异常", not at.exception, [e.value for e in at.exception])
+    check("SFA自检 索引齐全时给出正常态",
+          caption_of(at, "五张索引表齐全") != "", [c.value[:30] for c in at.caption][-4:])
+
+    _w = ("tessellated_annotation_occurrence 表仅 12 列，缺 `Equivalent Unicode String(s)`")
+    at.session_state["sfa_warn"] = [_w]
+    at.run()
+    check("SFA自检 有告警时逐条展示",
+          [_w] == [x.value for x in at.warning if x.value == _w], [x.value[:40] for x in at.warning])
+
     print()
     if FAIL:
         print(f"未通过 {len(FAIL)} / {TOTAL}")

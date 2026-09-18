@@ -19,20 +19,27 @@ md.handle  ==  SFA.draughting_callout.ID
 md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurrence.name
 ```
 
-语义映射三条路径（均已在 `nist_ftc_07` NIST 测试件上实测打通）：
+语义映射四条路径（均已在 `nist_ftc_07` / `nist_ftc_10` NIST 测试件上实测打通）：
 
 | 类别 | 路径 | 跳数 |
 |---|---|---|
 | GT / FCF | `ta.col11` 末尾 ID → 语义表 ID | 1 |
 | DIM | `ta.col11` 的 dimensional_size / _location ID → `dcr.dimension` 匹配 → `dcr.ID` → 语义表 ID | 2 |
 | datum | `ta.col11` 末尾形貌 ID − 1 → `datum.ID` → `datum.identification` | 2 |
+| datum_target | `ta.col11` 直接给出 `datum_target` 实体 ID → 语义表 ID | 1 |
+
+> `ta` = `tessellated_annotation_occurrence`，关联键只用到它的 **第 11 列
+> `Associated Semantic PMI`**。第 14 列 `Equivalent Unicode String(s)` 是图形文本通道，
+> 属于可选列：**缺它不影响关联**，只是「SFA图形文本」列会为空、内容比对回落到语义表文本。
+> 导出时勾上该列可获得最精确的按字形比对。历史上装载器把列数写死为 `>= 14`，
+> 缺列时整张表被静默跳过，表现为「一条都没对上」——现已改为按各列实际用途分别校验。
 
 ## 排查「一条都没对上」
 
 如果结果表里开发侧条目**全部**是「⚠️ 多余」、同时 SFA 侧大批「❌ 缺失」，
-那不是数据真的对不上，而是 **handle/name 没解析出来、ID 关联链没建立**。
+那不是数据真的对不上，而是 **ID 关联链没建立**。根因必在两侧之一，页面提供两个自检面板：
 
-页面会自动在结果上方弹出提示，并常驻一个「🔎 解析自检」面板，直接给出：
+**①「🔎 解析自检」—— 开发侧**
 
 | 指标 | 说明 |
 |---|---|
@@ -46,6 +53,30 @@ md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurre
 解析器对常见写法差异做了容错：`detailData:` 允许带引号、全角冒号、JSON 与标签同行、
 ```json 围栏；JSON 字段名 `handle`/`name` 大小写不敏感。但**标题行必须**匹配
 `^###\s+序号[.、]标题$`（如 `### 1. Simple Datum.1`）。
+
+**②「🧭 SFA 报告自检」—— SFA 侧**
+
+展示五张索引表的装载条数与列数（语义表 / draughting_callout / 图形标注 /
+datum / dcr），并在索引表缺列、缺表时给出告警。索引表不全会让关联链整段断掉，
+而表面上看起来和「开发侧没解析出来」一模一样。
+
+## 内容比对的分段口径
+
+一条 `Semantic PMI Summary` 记录可能把**图纸上多个标注**的文本揉在一行：
+
+```
+3X ⌀3.50 ± 0.2        ← 尺寸标注
+⌭ | 0.1               ← 圆柱度框架
+```
+
+因此取文本时必须按片段取（GT 取含 `|` 的 FCF 行，DIM 合并折行），
+直接拿整行会导致「缺数值 / 数量前缀不符」大面积误报。比较用的指纹为
+`数值集合 + 基准字母 + 修饰符 + 数量前缀`，其中：
+
+- 数量前缀（`2X`）整体剔除后再取数值与字母，否则 `X` 会被当成基准字母；
+- 修饰符优先按字形（`Ⓜ Ⓛ Ⓟ Ⓤ Ⓢ`）识别，因为字形紧跟字母，纯字母启发式会漏；
+- 基准字母与修饰符同形时（`L` 既是基准又可能是 LMC）在判定阶段**对两侧对称剔除**，
+  只损失区分度、不制造假冲突。
 
 ## 指标口径（三层，互不污染）
 
@@ -112,8 +143,8 @@ PyCharm 中直接运行 `pmi_compare_work.py` 也可以 —— 脚本内置 bare
 ```
 pmi_core.py            比对内核：真值装载 / markdown 解析 / 归一化 / ID 关联 / 指标 / 缺陷检测
 pmi_compare_work.py    Streamlit 界面（当前主入口）
-test_pmi_core.py       回归测试（111 项：指标口径、关联链路、缺陷检测、解析自检）
-test_ui_smoke.py       界面冒烟测试（AppTest 无头跑渲染分支 + 列口径断言）
+test_pmi_core.py       回归测试（135 项：指标口径、关联链路、缺陷检测、解析自检、列数容错）
+test_ui_smoke.py       界面冒烟测试（22 项：AppTest 无头跑渲染分支 + 列口径 + 自检面板断言）
 streamlit_launcher.py  启动器（规避 IDE 运行配置序列化差异）
 pmi_compare.py         早期版本，留档
 ```
@@ -121,8 +152,8 @@ pmi_compare.py         早期版本，留档
 ## 测试
 
 ```bash
-python test_pmi_core.py          # 内核回归：指标口径、关联链路、缺陷检测、解析自检
-python test_ui_smoke.py          # 界面冒烟：精简/完整视图、列口径、筛选切换、自检面板
+python test_pmi_core.py          # 内核回归：指标口径、关联链路、缺陷检测、解析自检、列数容错
+python test_ui_smoke.py          # 界面冒烟：精简/完整视图、列口径、筛选切换、两个自检面板
 python test_ui_smoke.py <xlsx>   # 也可指定真值报告路径
 ```
 

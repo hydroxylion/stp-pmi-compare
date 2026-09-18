@@ -348,6 +348,169 @@ check("parse_dev_markdown 仍返回条目", len(C.parse_dev_markdown(_md("detail
 
 
 # ============================================================
+# 四、SFA 列数容错 / datum_target / 分段取文本 / 修饰符字形
+#     覆盖「一条都没比对上」的根因：
+#       - tessellated_annotation_occurrence 缺 col14 时整表被跳过 -> 关联全断
+#       - datum_target 未走 1 跳引用 -> 基准目标全判多余
+#       - 语义行把尺寸行与 FCF 行揉在一起 -> 内容比对大面积误报
+# ============================================================
+def _build_sfa(tmpdir: str) -> str:
+    """构造一份最小 SFA 报告：ta 表刻意只给 12 列（缺 Equivalent Unicode String）。"""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    ws = wb.create_sheet("Header")
+    for r in ([f"Header row {i}", None, None] for i in range(3)):
+        ws.append(r)
+
+    # 语义表：注意 2002 号把「尺寸行 + FCF 行」揉在一行
+    ws = wb.create_sheet("Semantic PMI Summary")
+    ws.append(["Semantic PMI Summary (5)", None, None, None])
+    ws.append(["ID", "Entity", "Expected PMI", "Similar"])
+    for rid, ent, txt in [
+        (1001, "datum_system", "A | B"),
+        (2001, "position_tolerance", "⌖ | ⌀0.8 | A | B"),
+        (2002, "cylindricity_tolerance", "2X ⌀3.50 ± 0.2\n⌭ | 0.1"),
+        (2003, "datum_target", "K1 (area)"),
+    ]:
+        ws.append([str(rid), ent, txt, None])
+
+    ws = wb.create_sheet("draughting_callout")
+    ws.append(["draughting_callout  (4)", None])
+    for rid, nm in [(1001, "Simple Datum.1"), (1101, "Position.1"),
+                    (1201, "Cylindricity.1"), (1301, "Datum Target.1")]:
+        ws.append([str(rid), nm])
+
+    # ta 表只写 12 列，第 12 列（Associated Semantic PMI）在索引 10
+    ws = wb.create_sheet("tessellated_annotation_occurren")
+    ws.append(["tessellated_annotation_occurrence (4)"] + [None] * 11)
+    ws.append(["ID", "name", "styles", "item", "name", "children",
+               "presentation style", "color", "plane", "Associated Geometry",
+               "Associated Semantic PMI", "Saved Views"])
+    for rid, nm, ref in [(1100, "Position.1", "position_tolerance 2001"),
+                         (1200, "Cylindricity.1", "cylindricity_tolerance 2002"),
+                         (1000, "Simple Datum.1", "datum_feature 1002"),
+                         (1300, "Datum Target.1", "datum_target 2003")]:
+        ws.append([str(rid), nm] + [""] * 8 + [ref, ""])
+
+    ws = wb.create_sheet("datum")
+    ws.append(["datum  (1)", None, None, None, None, None])
+    # 只放 A：`Simple Datum.1` 的 ta 引用是 1002，靠 ID-1 两跳命中 1001
+    for rid, ident in [(1001, "A")]:
+        ws.append([str(rid), "datum", "x", "x", "x", ident])
+
+    path = os.path.join(tmpdir, "mini_sfa.xlsx")
+    wb.save(path)
+    return path
+
+
+_MD_MINI = """# PMI 提取结果
+
+## MBD_X
+
+- 标注数量：4 条
+
+### 1. A
+
+detailData:
+{
+  "handle": "1001",
+  "datum": "A",
+  "name": "Simple Datum.1",
+  "type": "datum_feature"
+}
+
+### 2. ⌖ Ø.8 A B
+
+detailData:
+{
+  "handle": "1101",
+  "name": "Position.1",
+  "type": "position_tolerance"
+}
+
+### 3. .1
+
+detailData:
+{
+  "handle": "1201",
+  "name": "Cylindricity.1",
+  "type": "cylindricity_tolerance"
+}
+
+### 4. K1
+
+detailData:
+{
+  "handle": "1301",
+  "datum": "K",
+  "target id": "1",
+  "name": "Datum Target.1",
+  "type": "datum_target"
+}
+"""
+
+import tempfile  # noqa: E402
+
+with tempfile.TemporaryDirectory() as _td:
+    _truth = C.load_sfa(_build_sfa(_td))
+
+check("列数容错 ta 表 12 列仍装载", len(_truth.ta), 4)
+check("列数容错 ta 列数已记录", _truth.ta_cols, 12)
+check("列数容错 缺图形文本通道时给出告警", bool(_truth.warnings), True)
+check("列数容错 告警指向 Unicode 列",
+      any("Equivalent Unicode String" in w for w in _truth.warnings), True)
+
+_items_mini, _ = C.parse_dev_markdown_ex(_MD_MINI)
+_rows_mini = C.match_items(_truth, _items_mini)
+_m_mini = C.compute_metrics(_rows_mini)
+check("列数容错 全部关联成功（无缺失）", _m_mini.sem_miss + _m_mini.sem_extra, 0)
+check("列数容错 召回 100", _m_mini.recall, 100.0)
+check("列数容错 基准 100", _m_mini.datum_coverage, 100.0)
+check("datum_target 走 1 跳引用",
+      C._lookup_semantic_for_dev(_items_mini[3], _truth)[1], "datum_target-1hop")
+check("datum_target 判定为命中",
+      [r.status for r in _rows_mini if r.key.startswith("MBD_X#4")], [C.ST_HIT])
+check("普通基准走 ID-1 两跳",
+      C._lookup_semantic_for_dev(_items_mini[0], _truth)[1], "datum-2hop")
+
+# GT 分段：语义行含「尺寸行 + FCF 行」时只取 FCF 行，且保留原文字形
+check("分段 GT 只取 FCF 行",
+      C.sfa_text_for("2X ⌀3.50 ± 0.2\n⌭ | 0.1", C.KIND_GT), "⌭ | 0.1")
+check("分段 GT 保留原文字形",
+      C.sfa_text_for("⌖ | ⌀0.8 | A | B", C.KIND_GT), "⌖ | ⌀0.8 | A | B")
+check("分段 无 FCF 行时退回首行",
+      C.sfa_text_for("⌀3.50 G6", C.KIND_GT), "⌀3.50 G6")
+check("分段 DIM 合并折行",
+      C.sfa_text_for("⌀0.250 +.003\n-.000", C.KIND_DIM), "⌀0.250 +.003 -.000")
+
+# 数量前缀不得污染字母集（`2X` 的 X 曾被当成基准字母）
+_tk_cnt = C.sem_tokens("2X ⌀5.50 ± 0.2")
+check("数量前缀 已识别", _tk_cnt["count"], 2)
+check("数量前缀 不泄漏进基准字母", "X" in _tk_cnt["letters"], False)
+
+# 修饰符优先按字形识别（开发 `EⓂ-FⓂ-GⓂ` vs SFA `E Ⓜ-F Ⓜ-G Ⓜ`）
+_tk_dev = C.sem_tokens("⌖ Ø.8 D EⓂ-FⓂ-GⓂ")
+_tk_sfa = C.sem_tokens("⌖ | ⌀0.8 | D | E Ⓜ-F Ⓜ-G Ⓜ")
+check("修饰符字形 开发侧识别 M", _tk_dev["modifiers"], ["M"])
+check("修饰符字形 SFA 侧识别 M", _tk_sfa["modifiers"], ["M"])
+check("修饰符字形 基准字母含 F", _tk_dev["letters"], ["D", "E", "F", "G"])
+check("修饰符字形 两侧判定一致",
+      C.compare_tokens(_tk_dev, _tk_sfa)[0], C.ST_HIT)
+
+# 基准字母与修饰符同形（`L` 既是基准又是 LMC）需对称消歧
+check("同形字母 对称剔除后判命中",
+      C.compare_tokens(C.sem_tokens("⌖ Ø0 H K L"),
+                       C.sem_tokens("⌖ | ⌀0 Ⓛ | H | K | L"))[0], C.ST_HIT)
+
+# 符号集：直线度用 U+2212、圆柱度 ⌭ 要检出；`⭩◎` 属渲染杂符不得误报
+check("符号 直线度符已收录", C.symbols_of("− | 0.2 / 15"), {"−"})
+check("符号 圆柱度符已收录", C.symbols_of("⌭ | 0.1"), {"⌭"})
+check("符号 杂符 ⭩◎ 不计入", C.symbols_of("⭩◎ | ⌓ | 1.5"), {"⌓"})
+
+
+# ============================================================
 # 汇总
 # ============================================================
 for f in FAIL:

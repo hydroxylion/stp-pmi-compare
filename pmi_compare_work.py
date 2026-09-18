@@ -455,7 +455,8 @@ def calculate_metrics_with_verdicts(df, verdicts):
 # ================= 新版 UI：实体 ID 精确关联比对 =================
 import pmi_core as core
 
-_STATE = {"rows": None, "verdicts": {}, "meta": {}, "dev_raw": ""}
+_STATE = {"rows": None, "verdicts": {}, "meta": {}, "dev_raw": "",
+          "sfa_warn": [], "sfa_stat": ""}
 for _k, _v in _STATE.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -563,6 +564,12 @@ if st.button("🚀 开始比对", type="primary"):
                 st.session_state.verdicts = {r.key: "待定" for r in rows}
                 st.session_state.meta = core.summarize(rows, truth, items)
                 st.session_state.dev_raw = raw_now
+                st.session_state.sfa_warn = list(truth.warnings)
+                st.session_state.sfa_stat = (
+                    f"语义表 {len(truth.semantic)} 项 · draughting_callout {len(truth.dc)} 条 · "
+                    f"图形标注 {len(truth.ta)} 条（{truth.ta_cols} 列） · "
+                    f"datum {len(truth.datum)} 项 · dcr {len(truth.dcr_by_dim)} 项"
+                )
                 st.rerun()
 
 # ---------------------------- 解析自检 ----------------------------
@@ -608,6 +615,28 @@ if raw_now.strip():
             "JSON 字段名须为小写 `handle` / `name` / `type`。"
         )
 
+# ---------------------------- SFA 报告自检 ----------------------------
+# 关联链断在 SFA 侧时（索引表缺列 / 缺表）同样会表现为「一条都没对上」，
+# 这里把五张索引表的装载结果与告警显式暴露出来。
+_sfa_stat = st.session_state.get("sfa_stat") or ""
+_sfa_warn = list(st.session_state.get("sfa_warn") or [])
+if _sfa_stat:
+    with st.expander(
+        "🧭 SFA 报告自检 —— " + ("⚠️ 有提示" if _sfa_warn else "✅ 索引齐全")
+        + f"　（{_sfa_stat}）",
+        expanded=bool(_sfa_warn),
+    ):
+        for _w in _sfa_warn:
+            st.warning(_w)
+        if not _sfa_warn:
+            st.caption("五张索引表齐全，图形通道与语义通道均可用。")
+        st.caption(
+            "ID 关联靠三张表打通：`draughting_callout.ID`(＝开发侧 handle) → "
+            "`tessellated_annotation_occurrence.第11列` → 语义表 ID。"
+            "其中 GT 1 跳、DIM 经 `dimensional_characteristic_repr` 2 跳、"
+            "基准 2 跳、基准目标 1 跳。"
+        )
+
 # ---------------------------- 结果 ----------------------------
 if st.session_state.rows:
     rows = st.session_state.rows
@@ -621,8 +650,9 @@ if st.session_state.rows:
     if _dev_rows and all(r.status == core.ST_EXTRA for r in _dev_rows):
         st.error(
             f"开发侧 {len(_dev_rows)} 条**全部**判为「⚠️ 多余」，同时 SFA 侧大量判为「❌ 缺失」"
-            "——这是 **handle/name 没解析出来、ID 关联未建立** 的典型特征，"
-            "而不是两边数据真的对不上。请展开上方「🔎 解析自检」看根因。"
+            "——这是 **ID 关联链没建立** 的典型特征，而不是两边数据真的对不上。"
+            "两处根因按顺序排查：① 展开「🔎 解析自检」看 handle/name 有没有解析出来；"
+            "② 展开「🧭 SFA 报告自检」看索引表是否齐全。"
         )
 
     f1, f2, f3 = st.columns(3)
