@@ -460,6 +460,46 @@ for _k, _v in _STATE.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
+# ---------------------------- 表格列视图 ----------------------------
+# 核心列：判定 + 比对内容 + 结论，默认全部显示
+VIEW_COLS = [
+    "匹配状态", "开发名称", "开发标注",
+    "SFA语义文本", "SFA图形文本",
+    "提取缺陷", "人工校验", "备注",
+]
+# 诊断列：Handle / 实体 ID / 类型 / 关联路径等，只在溯源时按需打开
+DIAG_COLS = [
+    "关联键", "分组", "Handle", "SFA语义ID", "SFA实体类型",
+    "层级", "类别", "缺陷详情", "关联路径",
+]
+# 列宽（未列出的按 small）
+COL_WIDTH = {
+    "开发名称": "small",
+    "开发标注": "medium",
+    "SFA语义文本": "medium",
+    "SFA图形文本": "medium",
+    "备注": "large",
+    "缺陷详情": "medium",
+}
+# 缺陷码释义（表格提示用）
+DEFECT_LEGEND = ("`ENC` 编码损坏 · `CNT` 数量前缀不符 · `SYM` 符号丢失 · `NUM` 数值缺失 · "
+                 "`EMP` 标题为空 · `MAP` handle-name 不一致 · `DUP` handle 重复")
+
+
+def build_column_config(cols):
+    """只为当前显示的列生成配置，避免多余 config 干扰。"""
+    cfg = {}
+    for c in cols:
+        if c == "人工校验":
+            cfg[c] = st.column_config.SelectboxColumn(
+                c, options=["待定", "误报", "确认为Bug"], width="small")
+        elif c in ("Handle", "SFA语义ID"):
+            cfg[c] = st.column_config.NumberColumn(c, width="small")
+        else:
+            cfg[c] = st.column_config.TextColumn(c, width=COL_WIDTH.get(c, "small"))
+    return cfg
+
+
 # ---------------------------- 侧边栏 ----------------------------
 with st.sidebar:
     st.header("1. 上传 SFA 报告 (Excel)")
@@ -475,6 +515,20 @@ with st.sidebar:
     only_defect = st.checkbox("只看含「提取缺陷」条目", value=False,
                               help="缺陷指开发侧数据本身有问题（乱码 / 丢符号 / 丢数量前缀），"
                                    "与分析指标解耦统计。")
+    st.divider()
+    st.header("3. 表格字段")
+    adv_cols = st.multiselect(
+        "附加字段（默认隐藏）",
+        DIAG_COLS,
+        default=[],
+        placeholder="需要溯源时再选",
+        help="Handle、SFA 实体 ID/类型、层级、关联路径等定位字段默认收起，"
+             "避免表格过宽。全部选中即等同完整视图。",
+    )
+    if adv_cols:
+        st.caption(f"当前补入 {len(adv_cols)} 列，共 {len(VIEW_COLS) + len(adv_cols)} 列。")
+    else:
+        st.caption(f"精简视图：{len(VIEW_COLS)} 列。")
 
 # ---------------------------- 输入 ----------------------------
 st.header("2. 内部项目提取结果（markdown）")
@@ -542,35 +596,28 @@ if st.session_state.rows:
         st.info("当前筛选条件下没有条目。")
     else:
         keys = [r.key for r in view]
+        cols = VIEW_COLS + adv_cols
         df_show = pd.DataFrame([
-            {**r.as_dict(), "人工校验": st.session_state.verdicts.get(r.key, "待定")}
+            {c: d[c] for c in cols}
             for r in view
+            for d in [{**r.as_dict(), "人工校验": st.session_state.verdicts.get(r.key, "待定")}]
         ])
+        # 只有结论两列可编辑，其余只读，防止误改真值文本
+        readonly = [c for c in cols if c not in ("人工校验", "备注")]
+        st.caption(
+            f"共 {len(view)} 行 × {len(cols)} 列。"
+            f"「提取缺陷」为空表示无缺陷；{DEFECT_LEGEND}。"
+            + ("　列宽不够可左右拖动表头。" if len(cols) > len(VIEW_COLS) else "")
+        )
         edited = st.data_editor(
             df_show,
-            column_config={
-                "关联键": st.column_config.TextColumn("关联键", width="small"),
-                "分组": st.column_config.TextColumn("分组", width="small"),
-                "开发标注": st.column_config.TextColumn("开发标注", width="medium"),
-                "开发名称": st.column_config.TextColumn("开发名称", width="medium"),
-                "Handle": st.column_config.NumberColumn("Handle", width="small"),
-                "SFA语义ID": st.column_config.NumberColumn("SFA语义ID", width="small"),
-                "SFA实体类型": st.column_config.TextColumn("SFA实体类型", width="medium"),
-                "SFA语义文本": st.column_config.TextColumn("SFA语义文本", width="large"),
-                "SFA图形文本": st.column_config.TextColumn("SFA图形文本", width="medium"),
-                "层级": st.column_config.TextColumn("层级", width="small"),
-                "类别": st.column_config.TextColumn("类别", width="small"),
-                "匹配状态": st.column_config.TextColumn("匹配状态", width="small"),
-                "提取缺陷": st.column_config.TextColumn("提取缺陷", width="small"),
-                "缺陷详情": st.column_config.TextColumn("缺陷详情", width="medium"),
-                "关联路径": st.column_config.TextColumn("关联路径", width="small"),
-                "人工校验": st.column_config.SelectboxColumn(
-                    "人工校验", options=["待定", "误报", "确认为Bug"], width="small"),
-                "备注": st.column_config.TextColumn("备注", width="large"),
-            },
+            column_config=build_column_config(cols),
+            disabled=readonly,
             hide_index=True,
             width="stretch",
-            key=f"editor_{layer_sel}_{group_sel}_{status_sel}",
+            height=min(760, 42 + 35 * len(view)),
+            key=f"editor_{layer_sel}_{group_sel}_{status_sel}_"
+                f"{hash(tuple(adv_cols)) & 0xFFFFFF}",
         )
         for pos, k in enumerate(keys):
             if pos < len(edited):
@@ -610,13 +657,19 @@ if st.session_state.rows:
                              expanded=True):
                 st.dataframe(
                     pd.DataFrame([{
-                        "关联键": k,
                         "分组": r.group,
                         "开发名称": r.dev_name,
                         "开发标注": r.dev_title,
                         "缺陷": " ".join(r.defects),
                         "详情": r.defect_detail,
                     } for k, r in dedup.items()]),
+                    column_config={
+                        "分组": st.column_config.TextColumn("分组", width="small"),
+                        "开发名称": st.column_config.TextColumn("开发名称", width="small"),
+                        "开发标注": st.column_config.TextColumn("开发标注", width="small"),
+                        "缺陷": st.column_config.TextColumn("缺陷", width="small"),
+                        "详情": st.column_config.TextColumn("详情", width="large"),
+                    },
                     hide_index=True, width="stretch",
                 )
         else:

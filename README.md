@@ -71,12 +71,29 @@ PyCharm 中直接运行 `pmi_compare_work.py` 也可以 —— 脚本内置 bare
 3. 上传或粘贴内部项目导出的 markdown。
 4. 查看三层指标、结果明细表、以及「🔧 提取缺陷清单」。
 
+## 界面视图
+
+结果表默认只出 **8 列**（判定 + 比对内容 + 结论），定位/溯源字段默认收起：
+
+| 分类 | 字段 |
+|---|---|
+| 默认显示（8 列） | 匹配状态 · 开发名称 · 开发标注 · SFA语义文本 · SFA图形文本 · 提取缺陷 · 人工校验 · 备注 |
+| 默认隐藏（9 列，侧边栏「3. 表格字段 → 附加字段」按需开启） | 关联键 · 分组 · Handle · SFA语义ID · SFA实体类型 · 层级 · 类别 · 缺陷详情 · 关联路径 |
+
+其他约定：
+
+- 除「人工校验」「备注」外全部只读，防止误改真值文本。
+- 导出 Excel 始终是**全字段**，不受界面列显示影响。
+- Streamlit 的 `column_config` 没有"默认隐藏列"能力，隐藏靠不放进 DataFrame 实现，
+  因此表格 `key` 带列指纹，避免切列时行内编辑状态串位。
+
 ## 文件结构
 
 ```
 pmi_core.py            比对内核：真值装载 / markdown 解析 / 归一化 / ID 关联 / 指标 / 缺陷检测
 pmi_compare_work.py    Streamlit 界面（当前主入口）
 test_pmi_core.py       回归测试（87 项，含缺陷与指标解耦断言）
+test_ui_smoke.py       界面冒烟测试（AppTest 无头跑渲染分支 + 列口径断言）
 streamlit_launcher.py  启动器（规避 IDE 运行配置序列化差异）
 pmi_compare.py         早期版本，留档
 ```
@@ -84,7 +101,9 @@ pmi_compare.py         早期版本，留档
 ## 测试
 
 ```bash
-python -m pytest test_pmi_core.py -q
+python test_pmi_core.py          # 内核回归：指标口径、关联链路、缺陷检测
+python test_ui_smoke.py          # 界面冒烟：精简/完整视图、列口径、筛选切换
+python test_ui_smoke.py <xlsx>   # 也可指定真值报告路径
 ```
 
 ## 环境
