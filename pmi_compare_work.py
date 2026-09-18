@@ -535,15 +535,17 @@ st.header("2. 内部项目提取结果（markdown）")
 md_file = st.file_uploader("上传 markdown 文件", type=["md", "txt", "json"], key="md_file")
 md_paste = st.text_area("或直接粘贴内容：", height=130, key="md_paste")
 
+# 统一取当前输入（供自检与比对共用）
+raw_now = ""
+if md_file is not None:
+    raw_now = md_file.getvalue().decode("utf-8", errors="replace")
+elif md_paste.strip():
+    raw_now = md_paste
+
 if st.button("🚀 开始比对", type="primary"):
-    raw = ""
-    if md_file is not None:
-        raw = md_file.getvalue().decode("utf-8", errors="replace")
-    elif md_paste.strip():
-        raw = md_paste
     if sfa_file is None:
         st.warning("请先上传 SFA Excel 报告！")
-    elif not raw.strip():
+    elif not raw_now.strip():
         st.warning("请提供内部项目的 markdown（上传文件或粘贴内容）！")
     else:
         truth = None
@@ -552,16 +554,59 @@ if st.button("🚀 开始比对", type="primary"):
         except Exception as e:
             st.error(f"SFA 报告解析失败：{e}")
         if truth is not None:
-            items = core.parse_dev_markdown(raw)
+            items = core.parse_dev_markdown(raw_now)
             if not items:
-                st.error("未能解析出任何标注条目。请确认格式：`## 分组` / `### N. 标题` / `detailData:` + JSON。")
+                st.error("未能解析出任何标注条目，详见下方「🔎 解析自检」。")
             else:
                 rows = core.match_items(truth, items)
                 st.session_state.rows = rows
                 st.session_state.verdicts = {r.key: "待定" for r in rows}
                 st.session_state.meta = core.summarize(rows, truth, items)
-                st.session_state.dev_raw = raw
+                st.session_state.dev_raw = raw_now
                 st.rerun()
+
+# ---------------------------- 解析自检 ----------------------------
+# 只读地跑一遍解析，把「为什么一条都没对上」显式暴露出来，避免静默全红。
+if raw_now.strip():
+    _items_probe, _diag = core.parse_dev_markdown_ex(raw_now)
+    _probs = _diag.problems()
+    _show = (not _diag.healthy) or _diag.items == 0
+    with st.expander(
+        ("🔎 解析自检 —— " + ("⚠️ 发现问题" if _probs else "✅ 解析正常")
+         + f"　（{_diag.summary()}）"),
+        expanded=_show,
+    ):
+        s1, s2, s3, s4, s5 = st.columns(5)
+        s1.metric("解析条目", _diag.items)
+        s2.metric("带 handle", f"{_diag.with_handle}/{_diag.items}" if _diag.items else "0/0")
+        s3.metric("带 name", f"{_diag.with_name}/{_diag.items}" if _diag.items else "0/0")
+        s4.metric("未解析到 detailData", len(_diag.detail_missing))
+        s5.metric("JSON 解析失败", len(_diag.json_failed))
+
+        if _probs:
+            st.error("**handle/name 是 ID 关联的唯一依据**。以下问题会让条目全部判为「⚠️ 多余」，"
+                     "同时 SFA 侧全部判为「❌ 缺失」：\n\n- "
+                     + "\n- ".join(_probs))
+        else:
+            st.success("解析出的每条标注都带上了 handle 与 name，ID 关联链路具备前提条件。")
+
+        if _diag.groups:
+            st.caption(f"识别到 {len(_diag.groups)} 个分组：" + "、".join(_diag.groups[:12])
+                       + ("…" if len(_diag.groups) > 12 else ""))
+        if _diag.headings_unmatched:
+            st.caption(f"以下 {len(_diag.headings_unmatched)} 行像标题但未匹配"
+                       f"`{_diag.h3_pattern}`（标题行须形如 `### 1. 标题`）：")
+            st.code("\n".join(_diag.headings_unmatched), language="text")
+        if _diag.detail_missing or _diag.json_failed or _diag.key_missing:
+            st.caption("逐条问题明细（条目前 20 条）：")
+            st.code("\n".join((_diag.detail_missing + _diag.json_failed
+                               + _diag.key_missing)[:20]), language="text")
+
+        st.caption(
+            "期望的 markdown 结构：`## 分组` → `- 标注数量：N 条` → `### 1. 标题` → "
+            "`detailData:`（**独占一行、半角冒号**）→ JSON，"
+            "JSON 字段名须为小写 `handle` / `name` / `type`。"
+        )
 
 # ---------------------------- 结果 ----------------------------
 if st.session_state.rows:
@@ -571,6 +616,14 @@ if st.session_state.rows:
 
     st.divider()
     st.subheader("📋 详细比对结果")
+
+    _dev_rows = [r for r in rows if not r.key.startswith("SFA")]
+    if _dev_rows and all(r.status == core.ST_EXTRA for r in _dev_rows):
+        st.error(
+            f"开发侧 {len(_dev_rows)} 条**全部**判为「⚠️ 多余」，同时 SFA 侧大量判为「❌ 缺失」"
+            "——这是 **handle/name 没解析出来、ID 关联未建立** 的典型特征，"
+            "而不是两边数据真的对不上。请展开上方「🔎 解析自检」看根因。"
+        )
 
     f1, f2, f3 = st.columns(3)
     layer_sel = f1.selectbox("层级", ["全部"] + sorted({r.layer for r in rows}))

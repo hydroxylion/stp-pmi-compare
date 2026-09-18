@@ -280,6 +280,74 @@ else:
              m.sem_extracted + m.datum_expected + m.note_total))
 
 # ============================================================
+# 三、解析自检（ParseDiag）—— 覆盖「一条都没对上」的各类畸形输入
+# ============================================================
+def _md(detail_block: str, heading: str = "### 1. 标题A") -> str:
+    return f"## MBD_A\n\n- 标注数量：1 条\n\n{heading}\n\n{detail_block}\n"
+
+
+_GOOD = '{\n  "handle": "13706",\n  "name": "Simple Datum.1",\n  "type": "datum_feature"\n}'
+
+# 正常
+it, dg = C.parse_dev_markdown_ex(_md("detailData:\n" + _GOOD))
+check("自检 正常 条目数", dg.items, 1)
+check("自检 正常 带handle", dg.with_handle, 1)
+check("自检 正常 带name", dg.with_name, 1)
+check("自检 正常 healthy", dg.healthy, True)
+check("自检 正常 无问题", dg.problems(), [])
+
+# 标签与 { 同行（旧实现会静默失败）
+it, dg = C.parse_dev_markdown_ex(_md("detailData: " + _GOOD))
+check("自检 detailData 同行 仍能解析", dg.with_handle, 1)
+check("自检 detailData 同行 healthy", dg.healthy, True)
+
+# 带 ```json 围栏
+it, dg = C.parse_dev_markdown_ex(_md("detailData:\n```json\n" + _GOOD + "\n```"))
+check("自检 围栏 仍能解析", dg.with_handle, 1)
+
+# 全角冒号 + 引号标签
+it, dg = C.parse_dev_markdown_ex(_md('"detailData"：\n' + _GOOD))
+check("自检 全角冒号+引号 仍能解析", dg.with_handle, 1)
+
+# 缺 detailData 块 -> 必然全判「多余」
+it, dg = C.parse_dev_markdown_ex(_md(""))
+check("自检 缺块 条目数", dg.items, 1)
+check("自检 缺块 记为未解析", len(dg.detail_missing), 1)
+check("自检 缺块 未取到 handle", dg.with_handle, 0)
+check("自检 缺块 healthy", dg.healthy, False)
+check("自检 缺块 给出提示", any("detailData" in p for p in dg.problems()), True)
+
+# broken JSON
+it, dg = C.parse_dev_markdown_ex(_md('detailData:\n{\n  "handle": "13706",\n')) 
+check("自检 JSON 截断 记为失败", len(dg.json_failed), 1)
+check("自检 JSON 截断 未取到 handle", dg.with_handle, 0)
+
+# 字段名大小写
+it, dg = C.parse_dev_markdown_ex(
+    _md('detailData:\n{\n  "Handle": "13706",\n  "Name": "Simple Datum.1"\n}'))
+check("自检 大写字段名 容错", (dg.with_handle, dg.with_name), (1, 1))
+
+# JSON 在但缺 handle/name
+it, dg = C.parse_dev_markdown_ex(_md('detailData:\n{\n  "type": "datum_feature"\n}'))
+check("自检 缺关键字段 记为 key_missing", len(dg.key_missing), 1)
+
+# 标题没序号
+it, dg = C.parse_dev_markdown_ex(_md("detailData:\n" + _GOOD, heading="### 标题A"))
+check("自检 标题无序号 条目数", dg.items, 0)
+check("自检 标题无序号 记录未匹配行", len(dg.headings_unmatched), 1)
+check("自检 标题无序号 给出提示",
+      any("没有解析出任何标注条目" in p for p in dg.problems()), True)
+
+# 四级标题（解析不出条目）
+it, dg = C.parse_dev_markdown_ex(_md("detailData:\n" + _GOOD, heading="#### 1. 标题A"))
+check("自检 四级标题 条目数", dg.items, 0)
+check("自检 四级标题 记录未匹配行", len(dg.headings_unmatched), 1)
+
+# 兼容入口仍返回纯条目
+check("parse_dev_markdown 仍返回条目", len(C.parse_dev_markdown(_md("detailData:\n" + _GOOD))), 1)
+
+
+# ============================================================
 # 汇总
 # ============================================================
 for f in FAIL:

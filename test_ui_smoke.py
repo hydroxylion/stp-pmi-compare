@@ -91,9 +91,12 @@ def build_md() -> str:
 
 
 FAIL = []
+TOTAL = 0
 
 
 def check(name, cond, got=""):
+    global TOTAL
+    TOTAL += 1
     if cond:
         print(f"  ok   {name}")
     else:
@@ -159,13 +162,32 @@ def main():
     at.selectbox[0].set_value("语义PMI").run()
     check("筛选切换无异常", not at.exception, [e.value for e in at.exception])
 
+    # ---------------- 解析自检面板 ----------------
+    at.text_area(key="md_paste").set_value(build_md())
+    at.run()
+    check("自检面板 正常输入 渲染无异常", not at.exception, [e.value for e in at.exception])
+    labels = [m.label for m in at.metric]
+    for need in ("解析条目", "带 handle", "带 name"):
+        check(f"自检面板 有指标「{need}」", need in labels, labels)
+    check("自检面板 正常输入 不报错", not at.error, [e.value for e in at.error])
+
+    broken = ("## MBD_A\n\n### 1. Simple Datum.1\n\n"
+              "detailData:\n{\n  \"type\": \"datum_feature\"\n}\n\n"
+              "### 2. Position.1\n\n这里忘了写 detailData\n")
+    at.text_area(key="md_paste").set_value(broken)
+    at.run()
+    check("自检面板 畸形输入 渲染无异常", not at.exception, [e.value for e in at.exception])
+    errs = " ".join(e.value for e in at.error)
+    check("自检面板 指出 detailData 缺失", "detailData" in errs, errs[:120])
+    check("自检面板 指出缺 handle", "handle" in errs, errs[:120])
+
     print()
     if FAIL:
-        print(f"未通过 {len(FAIL)} / {len(FAIL) + 12}")
+        print(f"未通过 {len(FAIL)} / {TOTAL}")
         for f in FAIL:
             print("  -", f)
         return 1
-    print("UI 冒烟全部通过")
+    print(f"UI 冒烟全部通过（{TOTAL}/{TOTAL}）")
     return 0
 
 

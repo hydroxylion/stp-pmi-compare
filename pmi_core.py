@@ -643,23 +643,132 @@ class DevItem:
 
 _H2 = re.compile(r"^##\s+(.+?)\s*$")
 _H3 = re.compile(r"^###\s+(\d+)\s*[.、]\s*(.*?)\s*$")
+_H3_LOOSE = re.compile(r"^###\s+(.*?)\s*$")
+_ANY_HEADING = re.compile(r"^#{1,6}\s+\S")
 _META = re.compile(r"^-\s*(分组\s*Handle|标注数量|标注总数|视图分组)\s*[:：]\s*(.*)$")
+# detailData 标签的宽松匹配：允许引号、大小写、全角冒号、JSON 与标签同行
+_DETAIL_LABEL = re.compile(r'^[-\s*]*"?detailData"?\s*[:：]\s*(\{.*)?$', re.IGNORECASE)
 
 
-def parse_dev_markdown(text: str) -> List[DevItem]:
-    """解析内部项目导出的 markdown。"""
+@dataclass
+class ParseDiag:
+    """markdown 解析过程的自检结果。
+
+    存在意义：解析失败时原先只会表现为「全部 ⚠️ 多余」，看不到根因。
+    这里把「为什么没解析出来」显式暴露出来。
+    """
+
+    total_lines: int = 0
+    groups: List[str] = field(default_factory=list)
+    headings_matched: int = 0
+    headings_unmatched: List[str] = field(default_factory=list)   # 「像标题但没匹配上」的行
+    items: int = 0
+    with_handle: int = 0
+    with_name: int = 0
+    detail_missing: List[str] = field(default_factory=list)       # 没找到 detailData 块的条目
+    json_failed: List[str] = field(default_factory=list)          # JSON 解析失败的条目
+    key_missing: List[str] = field(default_factory=list)          # JSON 在但缺 handle/name 的条目
+    h3_pattern: str = r"^###\s+(\d+)\s*[.、]\s*标题$"
+
+    @property
+    def healthy(self) -> bool:
+        return (self.items > 0 and self.with_handle == self.items
+                and self.with_name == self.items and not self.detail_missing
+                and not self.json_failed and not self.key_missing)
+
+    def problems(self) -> List[str]:
+        """返回面向用户的问题描述（空列表 = 无问题）。"""
+        p: List[str] = []
+        if self.items == 0:
+            if self.headings_unmatched:
+                p.append(f"识别到 {len(self.headings_unmatched)} 行像标题的内容，但都不符合 "
+                         f"`{self.h3_pattern}`，因此没有解析出任何标注条目。")
+            else:
+                p.append("没有解析出任何标注条目：未找到 `### 序号. 标题` 形式的标题行。")
+        if self.detail_missing:
+            p.append(f"{len(self.detail_missing)} 条标注没有解析到 `detailData:` JSON 块"
+                     f"（该块必须独占一行且用半角冒号），这些条目拿不到 handle，"
+                     f"会全部被判为「⚠️ 多余」。")
+        if self.json_failed:
+            p.append(f"{len(self.json_failed)} 条的 detailData JSON 解析失败，handle 取不到。")
+        if self.key_missing:
+            p.append(f"{len(self.key_missing)} 条的 JSON 里缺少 `handle` 或 `name` 字段"
+                     f"（字段名须为小写）。")
+        if self.items and self.with_handle < self.items and not (self.detail_missing or self.json_failed):
+            p.append(f"{self.items - self.with_handle} 条没有取到 handle，无法参与 ID 关联。")
+        return p
+
+    def summary(self) -> str:
+        return (f"解析条目 {self.items} / 带 handle {self.with_handle} / "
+                f"带 name {self.with_name} / 未解析块 {len(self.detail_missing)} / "
+                f"JSON 失败 {len(self.json_failed)}")
+
+
+def _lget(d: Dict[str, Any], key: str) -> Any:
+    """大小写不敏感地取 JSON 字段。"""
+    if key in d:
+        return d[key]
+    for k, v in d.items():
+        if str(k).lower() == key:
+            return v
+    return None
+
+
+def _read_detail_json(lines: Sequence[str], i: int) -> Tuple[str, int, str]:
+    """从 `detailData:` 标签之后开始读 JSON 块。
+
+    返回 (blob, 下一行下标, 错误说明)。容忍 ``` 围栏、空行、标签与 `{` 同行。
+    """
+    n = len(lines)
+    buf: List[str] = []
+    depth, started = 0, False
+    while i < n:
+        s = lines[i].strip()
+        if not started:
+            if not s or s.startswith("```"):
+                i += 1
+                continue
+            if "{" not in s:
+                return "", i, "`detailData:` 之后没有找到 JSON 起始 `{`"
+            started = True
+        buf.append(lines[i])
+        depth += lines[i].count("{") - lines[i].count("}")
+        i += 1
+        if depth <= 0:
+            break
+    if not started:
+        return "", i, "`detailData:` 块为空"
+    blob = re.sub(r"^[^{]*", "", "\n".join(buf), count=1).strip()
+    blob = re.sub(r"`+\s*$", "", blob).strip()
+    if depth > 0:
+        return blob, i, "JSON 大括号未闭合（内容可能被截断）"
+    return blob, i, ""
+
+
+def parse_dev_markdown_ex(text: str) -> Tuple[List[DevItem], ParseDiag]:
+    """解析内部项目导出的 markdown，并返回解析过程的自检信息。"""
+    diag = ParseDiag()
     items: List[DevItem] = []
     group, meta = "", {}
-    i, lines = 0, text.splitlines()
-    cur: Optional[DevItem] = None
+    lines = text.splitlines()
+    diag.total_lines = len(lines)
+    i, cur = 0, None
+
+    def _flush():
+        if cur is not None:
+            items.append(cur)
 
     while i < len(lines):
         ln = lines[i]
         m2 = _H2.match(ln)
         m3 = _H3.match(ln)
         mm = _META.match(ln.strip())
+        mdl = _DETAIL_LABEL.match(ln.strip())
+
         if m2:
             group = m2.group(1).strip()
+            if group not in diag.groups:
+                diag.groups.append(group)
             i += 1
             continue
         if mm:
@@ -667,52 +776,66 @@ def parse_dev_markdown(text: str) -> List[DevItem]:
             i += 1
             continue
         if m3:
-            if cur:
-                items.append(cur)
+            _flush()
             cur = DevItem(group=group, seq=int(m3.group(1)), title=m3.group(2), raw=ln)
+            diag.headings_matched += 1
             i += 1
             continue
-        if cur is not None and ln.strip() == "detailData:":
-            i += 1
-            buf, depth, started = [], 0, False
-            while i < len(lines):
-                l = lines[i]
-                if "{" in l:
-                    started = True
-                if started:
-                    buf.append(l)
-                    depth += l.count("{") - l.count("}")
-                    if depth <= 0 and started:
-                        break
-                elif l.strip():
-                    break
-                i += 1
-            blob = "\n".join(buf)
-            # 去掉尾部 ``` 之类的包围
-            blob = re.sub(r"^[^\{]*", "", blob, count=1).strip()
-            try:
-                d = json.loads(blob)
-            except Exception:
-                d = {}
-            cur.detail = d if isinstance(d, dict) else {}
-            cur.handle = _to_int(cur.detail.get("handle"))
-            cur.name = str(cur.detail.get("name", "") or "")
-            cur.original_type_name = str(cur.detail.get("original_type_name", "") or "")
-            cur.types = [x for x in str(cur.detail.get("type", "") or "").split("+") if x]
-            i += 1
+        if mdl and cur is not None:
+            cur._detail_seen = True          # type: ignore[attr-defined]
+            inline = (mdl.group(1) or "").strip()
+            if inline:
+                # 标签与 `{` 同行：把这段接回读取器
+                lines[i] = inline
+                blob, i, err = _read_detail_json(lines, i)
+            else:
+                blob, i, err = _read_detail_json(lines, i + 1)
+            cur.detail = {}
+            if blob:
+                try:
+                    d = json.loads(blob)
+                    if isinstance(d, dict):
+                        cur.detail = d
+                    else:
+                        err = err or "detailData 不是 JSON 对象"
+                except Exception as e:          # noqa: BLE001
+                    err = err or f"JSON 解析失败：{e}"
+            cur._detail_err = err             # type: ignore[attr-defined]
             continue
+        if _ANY_HEADING.match(ln) and not m2 and not m3 and not mdl:
+            if len(diag.headings_unmatched) < 10:
+                diag.headings_unmatched.append(ln.strip()[:60])
         i += 1
-    if cur:
-        items.append(cur)
 
-    # 视图顺序：按首次出现顺序编号
-    order = []
-    for it in items:
-        if it.group not in order:
-            order.append(it.group)
+    _flush()
+    diag.items = len(items)
+
+    # 统一按文件顺序汇总每条条目的解析结果，避免诊断信息错序
     for it in items:
         it.raw = f"{it.group}#{it.seq}"
-    return items
+        label = f"{it.group}#{it.seq} {it.title[:20]}"
+        if not getattr(it, "_detail_seen", False):
+            diag.detail_missing.append(f"{label} —— 未找到 `detailData:` 块")
+        elif getattr(it, "_detail_err", ""):
+            err = it._detail_err                       # type: ignore[attr-defined]
+            (diag.json_failed if "JSON" in err else diag.detail_missing).append(
+                f"{label} —— {err}")
+        it.handle = _to_int(_lget(it.detail, "handle"))
+        it.name = str(_lget(it.detail, "name") or "")
+        it.original_type_name = str(_lget(it.detail, "original_type_name") or "")
+        it.types = [x for x in str(_lget(it.detail, "type") or "").split("+") if x]
+        if it.handle is not None:
+            diag.with_handle += 1
+        if it.name:
+            diag.with_name += 1
+        if it.detail and it.handle is None and it.name == "":
+            diag.key_missing.append(label)
+    return items, diag
+
+
+def parse_dev_markdown(text: str) -> List[DevItem]:
+    """解析内部项目导出的 markdown（只取条目，丢弃自检信息）。"""
+    return parse_dev_markdown_ex(text)[0]
 
 
 def _to_int(v) -> Optional[int]:
