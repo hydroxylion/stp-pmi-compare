@@ -7,7 +7,8 @@
 
 1. 首屏能渲染（上传区 + 视图选项）
 2. 注入比对结果后，表格走「精简视图」且无异常
-3. 打开全部诊断字段后，表格走「完整视图」且无异常
+3. 侧边栏「显示字段」可勾选恢复隐藏列：全选走完整视图、全不选回落默认视图、
+   单选 `SFA图形文本` 也能正常渲染
 4. 切换筛选条件后 key 重建正常，不残留异常
 
 只验证「不炸 + 列数口径」，不做像素级断言。
@@ -38,6 +39,8 @@ def load_consts(path, names):
     """从界面脚本里静态读取模块级常量。
 
     直接 import 界面脚本会把它整个执行一遍（bare mode），所以走 AST。
+    支持 `A = B + C` 这类引用其它常量的写法：按声明顺序逐个求值，
+    已解析出的常量作为前序命名空间传入。
     """
     with open(path, encoding="utf-8") as f:
         tree = ast.parse(f.read())
@@ -46,7 +49,13 @@ def load_consts(path, names):
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
                 and isinstance(node.targets[0], ast.Name)
                 and node.targets[0].id in names):
-            out[node.targets[0].id] = ast.literal_eval(node.value)
+            try:
+                out[node.targets[0].id] = ast.literal_eval(node.value)
+            except (ValueError, TypeError):
+                expr = ast.Expression(body=node.value)
+                ast.fix_missing_locations(expr)
+                out[node.targets[0].id] = eval(          # noqa: S307
+                    compile(expr, path, "eval"), {}, dict(out))
     missing = set(names) - set(out)
     if missing:
         raise AssertionError(f"界面脚本缺少常量：{sorted(missing)}")
@@ -54,8 +63,9 @@ def load_consts(path, names):
 
 
 UI_PATH = os.path.join(PROJ, "pmi_compare_work.py")
-_SPEC = load_consts(UI_PATH, {"VIEW_COLS", "DIAG_COLS"})
+_SPEC = load_consts(UI_PATH, {"VIEW_COLS", "DIAG_COLS", "ALL_COLS"})
 VIEW_COLS, DIAG_COLS = _SPEC["VIEW_COLS"], _SPEC["DIAG_COLS"]
+ALL_COLS = _SPEC["ALL_COLS"]
 
 # 覆盖语义项 / 注释项 / 含缺陷项三类，够走通所有渲染分支
 ROWS = [
@@ -135,21 +145,28 @@ def main():
     rows = core.match_items(truth, items)
     meta = core.summarize(rows, truth, items)
     print(f"数据：开发条目 {len(items)} 条 → 比对行 {len(rows)} 行")
-    print(f"精简视图列定义：{len(VIEW_COLS)} 列 / 诊断列定义：{len(DIAG_COLS)} 列")
+    print(f"精简视图列定义：{len(VIEW_COLS)} 列 / 默认隐藏：{len(DIAG_COLS)} 列")
 
-    # 列定义本身的口径断言（防止以后误把诊断字段塞回默认视图）
-    must_show = {"匹配状态", "开发标注", "SFA语义文本", "提取缺陷", "人工校验", "备注"}
-    must_hide = {"Handle", "SFA语义ID", "SFA实体类型", "关联路径"}
-    check("默认视图含核心列", must_show <= set(VIEW_COLS),
+    # 列定义本身的口径断言（防止以后误把诊断字段塞回默认视图，或把分组列藏起来）
+    must_show = {"匹配状态", "分组", "开发名称", "开发标注",
+                 "SFA语义文本", "提取缺陷", "人工校验", "备注"}
+    must_hide = {"SFA图形文本", "Handle", "SFA语义ID", "SFA实体类型", "关联路径"}
+    check("默认视图含核心列（含分组）", must_show <= set(VIEW_COLS),
           must_show - set(VIEW_COLS))
-    check("检索字段默认隐藏", not (must_hide & set(VIEW_COLS)),
+    check("分组列默认显示", "分组" in VIEW_COLS, VIEW_COLS)
+    check("默认视图不含图形文本与检索字段", not (must_hide & set(VIEW_COLS)),
           must_hide & set(VIEW_COLS))
-    check("视图与诊断列无重叠", not (set(VIEW_COLS) & set(DIAG_COLS)),
+    check("SFA图形文本默认隐藏", "SFA图形文本" in DIAG_COLS, DIAG_COLS)
+    check("视图与隐藏列无重叠", not (set(VIEW_COLS) & set(DIAG_COLS)),
           set(VIEW_COLS) & set(DIAG_COLS))
+    check("全字段 = 可见 + 隐藏且无重复", len(ALL_COLS) == len(set(ALL_COLS)),
+          ALL_COLS)
     all_cols = set(core.MatchRow().as_dict()) | {"人工校验"}
     check("列定义覆盖 as_dict 全部字段",
-          (set(VIEW_COLS) | set(DIAG_COLS)) == all_cols,
-          all_cols - (set(VIEW_COLS) | set(DIAG_COLS)))
+          set(ALL_COLS) == all_cols,
+          all_cols - set(ALL_COLS))
+    check("可勾选字段含全部默认隐藏项",
+          set(DIAG_COLS) <= set(ALL_COLS), set(DIAG_COLS) - set(ALL_COLS))
 
     at = AppTest.from_file(UI_PATH, default_timeout=60)
     at.run()
@@ -164,14 +181,33 @@ def main():
     check(f"精简视图列数 = {len(VIEW_COLS)}", f"× {len(VIEW_COLS)} 列" in cap, cap)
 
     ms = [m for m in at.sidebar.multiselect]
-    check("侧边栏有「附加字段」多选框", len(ms) == 1, [m.label for m in ms])
+    check("侧边栏有「显示字段」多选框", len(ms) == 1, [m.label for m in ms])
     if ms:
-        ms[0].set_value(list(DIAG_COLS))
+        check("显示字段默认值 = 核心列", list(ms[0].value) == list(VIEW_COLS), ms[0].value)
+        check("可勾选字段 = 全部字段", list(ms[0].options) == list(ALL_COLS), ms[0].options)
+        check("默认状态有隐藏列提示", "已隐藏" in caption_of(at, "已隐藏"), "")
+
+        at.sidebar.multiselect[0].set_value(list(ALL_COLS))
         at.run()
-        total = len(VIEW_COLS) + len(DIAG_COLS)
+        total = len(ALL_COLS)
         check("完整视图渲染无异常", not at.exception, [e.value for e in at.exception])
         cap = caption_of(at, "行 ×")
         check(f"完整视图列数 = {total}", f"× {total} 列" in cap, cap)
+        check("完整视图不再提示隐藏", "已隐藏" not in cap, cap)
+
+        # 全部取消也要能渲染：回落默认视图，不炸
+        at.sidebar.multiselect[0].set_value([])
+        at.run()
+        check("取消全部勾选不炸", not at.exception, [e.value for e in at.exception])
+        cap = caption_of(at, "行 ×")
+        check("取消全部回落默认视图", f"× {len(VIEW_COLS)} 列" in cap, cap)
+
+        # 只恢复「SFA图形文本」单列叠加核心列
+        at.sidebar.multiselect[0].set_value(list(VIEW_COLS) + ["SFA图形文本"])
+        at.run()
+        cap = caption_of(at, "行 ×")
+        check("单独恢复 SFA图形文本",
+              f"× {len(VIEW_COLS) + 1} 列" in cap and "SFA图形文本" not in cap, cap)
 
     at.selectbox[0].set_value("语义PMI").run()
     check("筛选切换无异常", not at.exception, [e.value for e in at.exception])

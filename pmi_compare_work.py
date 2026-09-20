@@ -463,19 +463,26 @@ for _k, _v in _STATE.items():
         st.session_state[_k] = _v
 
 # ---------------------------- 表格列视图 ----------------------------
-# 核心列：判定 + 比对内容 + 结论，默认全部显示
+# 核心列：判定 + 分组 + 比对内容 + 结论，默认全部显示
+# 「分组」保持在核心列 —— 同一次比对可能含多个视图分组，不显示会分不清条目归属。
 VIEW_COLS = [
-    "匹配状态", "开发名称", "开发标注",
-    "SFA语义文本", "SFA图形文本",
+    "匹配状态", "分组", "开发名称", "开发标注",
+    "SFA语义文本",
     "提取缺陷", "人工校验", "备注",
 ]
-# 诊断列：Handle / 实体 ID / 类型 / 关联路径等，只在溯源时按需打开
+# 诊断列：默认隐藏，需要溯源时在侧边栏「显示字段」里勾选恢复
+# `SFA图形文本` 也在其中 —— 它依赖导出时勾选 Graphic Presentation PMI，
+# 日常核查看 `SFA语义文本` 即可，比对内容不一致时再打开它。
 DIAG_COLS = [
-    "关联键", "分组", "Handle", "SFA语义ID", "SFA实体类型",
+    "SFA图形文本", "关联键", "Handle", "SFA语义ID", "SFA实体类型",
     "层级", "类别", "缺陷详情", "关联路径", "多视图",
 ]
+# 全部字段的固定顺序：表格列序一律按这个排，与用户的勾选先后无关。
+ALL_COLS = VIEW_COLS + DIAG_COLS
 # 列宽（未列出的按 small）
 COL_WIDTH = {
+    "分组": "small",
+    "匹配状态": "small",
     "开发名称": "small",
     "开发标注": "medium",
     "SFA语义文本": "medium",
@@ -535,18 +542,26 @@ with st.sidebar:
                                    "与分析指标解耦统计。")
     st.divider()
     st.header("3. 表格字段")
-    adv_cols = st.multiselect(
-        "附加字段（默认隐藏）",
-        DIAG_COLS,
-        default=[],
-        placeholder="需要溯源时再选",
-        help="Handle、SFA 实体 ID/类型、层级、关联路径等定位字段默认收起，"
-             "避免表格过宽。全部选中即等同完整视图。",
+    selected_cols = st.multiselect(
+        "显示字段",
+        ALL_COLS,
+        default=VIEW_COLS,
+        key="field_picker",
+        placeholder="默认只显示核心列",
+        help="默认显示核心列（判定 / 分组 / 比对内容 / 结论）。"
+             "需要溯源时勾选其它字段即可恢复显示，例如 `SFA图形文本`、`Handle`、"
+             "`SFA语义ID`、`SFA实体类型`、`关联路径`；全部勾上即完整视图，"
+             "也可以反选把核心列临时收起。",
     )
-    if adv_cols:
-        st.caption(f"当前补入 {len(adv_cols)} 列，共 {len(VIEW_COLS) + len(adv_cols)} 列。")
+    _picked = [c for c in ALL_COLS if c in set(selected_cols)]
+    _hid_now = [c for c in ALL_COLS if c not in set(_picked)]
+    if not _picked:
+        st.warning("至少保留一列，已暂时回落为默认视图。")
+    if _hid_now:
+        st.caption(f"当前 {len(_picked)} 列，已隐藏 {len(_hid_now)} 列："
+                   + "、".join(f"`{c}`" for c in _hid_now))
     else:
-        st.caption(f"精简视图：{len(VIEW_COLS)} 列。")
+        st.caption(f"完整视图：{len(_picked)} 列，无隐藏字段。")
 
 # ---------------------------- 输入 ----------------------------
 st.header("2. 内部项目提取结果（markdown）")
@@ -771,7 +786,8 @@ if st.session_state.rows:
         st.info("当前筛选条件下没有条目。")
     else:
         keys = [r.key for r in view]
-        cols = VIEW_COLS + adv_cols
+        # 列序固定按 ALL_COLS，与勾选先后无关；一列不剩时回落默认视图
+        cols = [c for c in ALL_COLS if c in set(selected_cols)] or list(VIEW_COLS)
         df_show = pd.DataFrame([
             {c: d[c] for c in cols}
             for r in view
@@ -779,10 +795,13 @@ if st.session_state.rows:
         ])
         # 只有结论两列可编辑，其余只读，防止误改真值文本
         readonly = [c for c in cols if c not in ("人工校验", "备注")]
+        _hid = [c for c in ALL_COLS if c not in cols]
         st.caption(
             f"共 {len(view)} 行 × {len(cols)} 列。"
             f"「提取缺陷」为空表示无缺陷；{DEFECT_LEGEND}。"
-            + ("　列宽不够可左右拖动表头。" if len(cols) > len(VIEW_COLS) else "")
+            + (f"　已隐藏 {len(_hid)} 列（侧边栏「显示字段」勾选即恢复）："
+               + "、".join(f"`{c}`" for c in _hid) + "。" if _hid else "")
+            + ("　列宽不够可左右拖动表头。" if len(cols) > 8 else "")
         )
         edited = st.data_editor(
             df_show,
@@ -792,7 +811,7 @@ if st.session_state.rows:
             width="stretch",
             height=min(760, 42 + 35 * len(view)),
             key=f"editor_{layer_sel}_{group_sel}_{status_sel}_"
-                f"{hash(tuple(adv_cols)) & 0xFFFFFF}",
+                f"{hash(tuple(cols)) & 0xFFFFFF}",
         )
         for pos, k in enumerate(keys):
             if pos < len(edited):
