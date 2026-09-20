@@ -6,6 +6,7 @@
 
 # 其余显式钉成 LF：仓库里统一 LF，工作区不要被 autocrlf 来回改，
 # 否则每次 git 操作都刷「LF will be replaced by CRLF」的警告。
+.gitattributes text eol=lf
 *.py text eol=lf
 *.md text eol=lf
 *.txt text eol=lf
