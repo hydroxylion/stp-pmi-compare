@@ -4,7 +4,8 @@
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 
-# 其余按仓库默认
-*.py text
-*.md text
-*.txt text
+# 其余显式钉成 LF：仓库里统一 LF，工作区不要被 autocrlf 来回改，
+# 否则每次 git 操作都刷「LF will be replaced by CRLF」的警告。
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
