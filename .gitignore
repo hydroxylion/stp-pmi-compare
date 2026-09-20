@@ -32,3 +32,6 @@ samples/*
 
 # ---- 诊断产物 ----
 doctor_report.txt
+
+# ---- 验证记录 ----
+验证_*.txt
