@@ -212,6 +212,25 @@ def main():
     at.selectbox[0].set_value("语义PMI").run()
     check("筛选切换无异常", not at.exception, [e.value for e in at.exception])
 
+    # ---------------- 缺陷清单（SFA 原值 + 单独导出） ----------------
+    # 只看开发侧文本没法判断「到底哪对不上」，缺陷清单必须带上 SFA 侧原值，
+    # 并且能单独导出（交回开发侧不用连整张结果表一起给）。
+    _drecs = core.defect_records(rows)
+    check("夹具确有缺陷（缺陷清单会渲染）", bool(_drecs), _drecs)
+    _dl_labels = [d.label for d in at.download_button]
+    check("有「导出比对结果」按钮",
+          any("导出比对结果" in x for x in _dl_labels), _dl_labels)
+    check("有「导出缺陷清单」按钮",
+          any("缺陷清单" in x for x in _dl_labels), _dl_labels)
+    _dcols_txt = "\n".join(
+        d.value.to_csv(index=False) for d in at.dataframe
+        if hasattr(d.value, "to_csv") and "SFA条数" in d.value.to_csv(index=False)
+    )
+    for _c in ("SFA条数", "SFA语义文本", "SFA图形文本", "关联路径"):
+        check(f"缺陷清单含列「{_c}」", _c in _dcols_txt, _dcols_txt[:200])
+    check("缺陷清单展开区渲染无异常", not at.exception,
+          [e.value for e in at.exception])
+
     # ---------------- 解析自检面板 ----------------
     at.text_area(key="md_paste").set_value(build_md())
     at.run()

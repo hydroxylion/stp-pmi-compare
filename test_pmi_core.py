@@ -280,6 +280,24 @@ else:
     check("缺陷 分布", m.defect_by_code,
           {C.DF_CNT: 4, C.DF_MRG: 6, C.DF_SYM: 3, C.DF_ENC: 2})
     check("缺陷 总数", m.defect_total, 15)
+
+    # 缺陷清单（展示 / 导出用）：必须带 SFA 侧原值 —— 只看开发侧文本没法判断
+    # 「到底哪对不上」，排查时还得回查报告。
+    recs = C.defect_records(rows)
+    check("缺陷清单 条数与指标一致", len(recs), m.defect_rows)
+    check("缺陷清单 字段齐全",
+          set(recs[0]) >= {"分组", "开发名称", "开发标注", "Handle", "缺陷",
+                           "SFA条数", "SFA语义ID", "SFA语义文本", "SFA图形文本",
+                           "关联路径", "详情", "定位"}, True)
+    check("缺陷清单 至少给出一条 SFA 原值",
+          any(r["SFA语义文本"] for r in recs), True)
+    _mrg_rec = next(r for r in recs if C.DF_MRG in r["缺陷"])
+    check("缺陷清单 复合公差给出 SFA 多值与条数",
+          (_mrg_rec["SFA条数"], len(_mrg_rec["SFA语义文本"].split("／"))), (2, 2))
+    check("缺陷清单 多值去重（同一 FCF 不重复列）",
+          len(set(_mrg_rec["SFA语义文本"].split("／"))), 2)
+    check("缺陷清单 带关联路径与 handle",
+          bool(_mrg_rec["关联路径"]) and _mrg_rec["Handle"] != "", True)
     # 缺陷与分析指标解耦：有缺陷的条目只要内容对得上，仍计入命中
     check("缺陷不拉低指标（缺陷条目仍全命中）",
           [r.key for r in rows if r.defects and r.layer == C.LAYER_SEM

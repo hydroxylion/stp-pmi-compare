@@ -329,14 +329,24 @@ def main():
                 out(f"  {views:28s} {len(names)} 条："
                     + " ".join(sorted(n for n in names if n)[:6]))
 
-        groups = core.defect_groups(rows)
-        if groups:
+        recs = core.defect_records(rows)
+        if recs:
             out()
-            out(f"提取缺陷清单（{len(groups)} 条，按开发标注聚合）：")
-            for base, g in groups.items():
-                out(f"  {base:12s} {g['row'].dev_title[:26]:28s}"
-                    f" {' '.join(g['codes'])} | {g['detail']}")
-            if any(core.DF_MRG in g["codes"] for g in groups.values()):
+            out(f"提取缺陷清单（{len(recs)} 条，按开发标注聚合）：")
+            # SFA 原值必须并排给出：只看开发侧文本没法判断「到底哪对不上」，
+            # 排查时还得回查报告。语义文本（表里逐字段）与图形文本（图纸上
+            # 实际渲染的字）是两个通道，都列出来。
+            for r in recs:
+                out(f"  {r['定位']:12s} {r['开发标注'][:26]:28s} {r['缺陷']}")
+                sfa = r["SFA语义文本"] or "（无）"
+                if r["SFA条数"] > 1:
+                    sfa += f"　（共 {r['SFA条数']} 条）"
+                out(f"      SFA语义: {sfa}")
+                if r["SFA图形文本"]:
+                    out(f"      SFA图形: {r['SFA图形文本']}")
+                if r["详情"]:
+                    out(f"      详情   : {r['详情']}")
+            if any(core.DF_MRG in r["缺陷"] for r in recs):
                 out(f"  ↑ {core.DF_MRG} 是唯一需要对照真值的缺陷码"
                     "（该不该拆成多条要看 SFA）；其余七个只看开发侧即可判定。")
 

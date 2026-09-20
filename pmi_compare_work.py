@@ -884,30 +884,48 @@ if st.session_state.rows:
         if m.defect_by_code:
             st.warning("缺陷分布：" + "　".join(f"**{k}** × {v}"
                                           for k, v in m.defect_by_code.items()))
-            _dg = core.defect_groups(rows)
-            _mrg = any(core.DF_MRG in g["codes"] for g in _dg.values())
-            with st.expander(f"🔧 提取缺陷清单（{len(_dg)} 条，可直接交回开发侧排查）",
+            _recs = core.defect_records(rows)
+            _mrg = any(core.DF_MRG in r["缺陷"] for r in _recs)
+            with st.expander(f"🔧 提取缺陷清单（{len(_recs)} 条，可直接交回开发侧排查）",
                              expanded=True):
                 if _mrg:
                     st.caption(
                         f"`{core.DF_MRG}` 是唯一需要对照真值的码（该不该拆成多条要看 "
                         "SFA 的拆分口径）；其余七个只看开发侧即可判定。")
+                _dcols = ["分组", "开发名称", "开发标注", "缺陷", "SFA条数",
+                          "SFA语义文本", "SFA图形文本", "关联路径", "详情"]
                 st.dataframe(
-                    pd.DataFrame([{
-                        "分组": g["row"].group,
-                        "开发名称": g["row"].dev_name,
-                        "开发标注": g["row"].dev_title,
-                        "缺陷": " ".join(g["codes"]),
-                        "详情": g["detail"],
-                    } for k, g in _dg.items()]),
+                    pd.DataFrame(_recs)[_dcols],
                     column_config={
                         "分组": st.column_config.TextColumn("分组", width="small"),
                         "开发名称": st.column_config.TextColumn("开发名称", width="small"),
-                        "开发标注": st.column_config.TextColumn("开发标注", width="small"),
+                        "开发标注": st.column_config.TextColumn("开发标注", width="medium"),
                         "缺陷": st.column_config.TextColumn("缺陷", width="small"),
+                        "SFA条数": st.column_config.NumberColumn("SFA条数", width="small"),
+                        "SFA语义文本": st.column_config.TextColumn(
+                            "SFA语义文本", width="medium",
+                            help="SFA 语义表里的原值（逐字段）。复合公差会给出多条，"
+                                 "用 `／` 分隔；只报缺陷不看真值就没法判断哪里对不上。"),
+                        "SFA图形文本": st.column_config.TextColumn(
+                            "SFA图形文本", width="medium",
+                            help="SFA 图形通道渲染的原文（图纸上实际显示的字）"),
+                        "关联路径": st.column_config.TextColumn("关联路径", width="small"),
                         "详情": st.column_config.TextColumn("详情", width="large"),
                     },
                     hide_index=True, width="stretch",
+                )
+                _dbuf = BytesIO()
+                with pd.ExcelWriter(_dbuf, engine="openpyxl") as _w:
+                    pd.DataFrame(_recs).to_excel(_w, index=False, sheet_name="缺陷清单")
+                st.download_button(
+                    "📥 导出缺陷清单 (Excel)",
+                    data=_dbuf.getvalue(),
+                    file_name="PMI提取缺陷清单.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument."
+                         "spreadsheetml.sheet",
+                    key="dl_defects",
+                    help="含 SFA 原值（语义 + 图形两个通道）与缺陷详情，"
+                         "可直接转给开发侧。",
                 )
         else:
             st.success("✅ 未检出开发侧提取缺陷。")
@@ -933,6 +951,11 @@ if st.session_state.rows:
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name="比对结果")
         pd.DataFrame([meta]).T.rename(columns={0: "值"}).to_excel(writer, sheet_name="指标汇总")
+        # 缺陷清单单开一张表：它是「按开发标注聚合」的视角（复合公差的多个子行
+        # 合并成一行），与上面逐子行的「比对结果」不是一回事，混在一起没法看。
+        _drecs_all = core.defect_records(rows)
+        if _drecs_all:
+            pd.DataFrame(_drecs_all).to_excel(writer, index=False, sheet_name="缺陷清单")
     st.download_button(
         "📥 导出比对结果 (Excel)",
         data=buf.getvalue(),

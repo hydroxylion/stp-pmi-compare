@@ -2131,14 +2131,17 @@ def defect_groups(rows: Sequence[MatchRow]) -> Dict[str, Dict[str, Any]]:
     所以缺陷要合并去重后再计数：只取第一条子行会漏掉只出现在后续子行的码 ——
     `DF_MRG` 恰恰是在每条复合公差子行上才判得出来的那一个。
 
-    返回 {开发条目 key: {"row": 首条子行, "codes": [...], "detail": "..."}}，
-    顺序与 rows 首次出现顺序一致。
+    返回 {开发条目 key: {"row": 首条子行, "rows": [全部子行], "codes": [...],
+    "detail": "..."}}，顺序与 rows 首次出现顺序一致。`rows` 供缺陷清单展示 /
+    导出时带上每条子行的 SFA 原值（复合公差一条标注对多个语义实体）。
     """
     out: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         if not r.defects:
             continue
-        g = out.setdefault(r.key.split("@")[0], {"row": r, "codes": [], "detail": ""})
+        g = out.setdefault(r.key.split("@")[0],
+                           {"row": r, "rows": [], "codes": [], "detail": ""})
+        g["rows"].append(r)
         for c in r.defects:
             if c not in g["codes"]:
                 g["codes"].append(c)
@@ -2146,6 +2149,44 @@ def defect_groups(rows: Sequence[MatchRow]) -> Dict[str, Dict[str, Any]]:
         if d and d not in g["detail"]:
             g["detail"] = f"{g['detail']}；{d}" if g["detail"] else d
     return out
+
+
+def defect_records(rows: Sequence[MatchRow]) -> List[Dict[str, Any]]:
+    """缺陷清单的展示 / 导出记录（中文列名，UI 与 doctor 共用同一套字段）。
+
+    补上 **SFA 侧原值** —— 只看开发侧文本没法判断「到底哪对不上」，排查时还得
+    回查报告。这里把每条标注对应的 SFA 语义文本（表里逐字段）与图形文本
+    （图纸上实际渲染的字）一并带上，可直接并排对照。
+
+    一条开发标注可能映射多个语义实体（复合公差），多值按顺序用 `／` 连接并去重；
+    `SFA条数` 给出实际有几条，便于判断是不是「该拆没拆」。
+    """
+    def _join(vals: Sequence[Any]) -> str:
+        seen: List[str] = []
+        for v in vals:
+            s = str(v if v is not None else "").strip()
+            if s and s not in seen:
+                seen.append(s)
+        return "／".join(seen)
+
+    recs: List[Dict[str, Any]] = []
+    for base, g in defect_groups(rows).items():
+        head, subs = g["row"], g["rows"]
+        recs.append({
+            "分组": head.group,
+            "开发名称": head.dev_name,
+            "开发标注": head.dev_title,
+            "Handle": head.handle if head.handle is not None else "",
+            "缺陷": " ".join(g["codes"]),
+            "SFA条数": len([s for s in subs if s.sfa_sem_id is not None]),
+            "SFA语义ID": _join(s.sfa_sem_id for s in subs),
+            "SFA语义文本": _join(s.sfa_text for s in subs),
+            "SFA图形文本": _join(s.sfa_graphic_text for s in subs),
+            "关联路径": _join(s.path for s in subs),
+            "详情": g["detail"],
+            "定位": base,
+        })
+    return recs
 
 
 @dataclass
@@ -2307,7 +2348,7 @@ __all__ = [
     "KIND_GT", "KIND_DIM", "KIND_DATUM", "KIND_NOTE",
     "LAYER_SEM", "LAYER_DATUM", "LAYER_NOTE", "LAYER_NOTRUTH",
     "DF_ENC", "DF_EMPTY", "DF_CNT", "DF_SYM", "DF_NUM", "DF_MAP", "DF_DUP", "DF_MRG",
-    "DEFECT_CODES", "MRG_REMARK", "defect_groups",
+    "DEFECT_CODES", "MRG_REMARK", "defect_groups", "defect_records",
     "SfaTruth", "DevItem", "MatchRow", "Metrics",
     "load_sfa", "parse_dev_markdown", "match_items", "compute_metrics", "summarize",
     "normalize", "sem_tokens", "fix_mojibake", "norm_number",
