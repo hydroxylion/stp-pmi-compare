@@ -49,6 +49,30 @@ md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurre
 
 ## 排查「一条都没对上」
 
+### 最快路径：双击 `诊断.bat`
+
+把文件拖到 bat 上就行，不用记命令行：
+
+| 做法 | 结果 |
+|---|---|
+| 只拖 **SFA 报告的 xlsx** | 诊断 SFA 侧（装载、列定位、交叉校验、未收录字符） |
+| 同时选中 **xlsx + 开发 markdown** 一起拖 | 完整诊断，含关联路径分布与比对指标 |
+
+两个文件顺序随便，脚本会按扩展名自动认。也可以在 `诊断.bat` 双击后按提示粘贴路径。
+
+跑完在本目录生成 **`doctor_report.txt`** —— 结果不对时把这个文件发出来即可。
+
+### 或者用命令行
+
+```bash
+cd /d "C:\Users\hui_ou\Desktop\STP比对工具"
+.venv\Scripts\python.exe doctor.py "F:\路径\xxx-sfa.xlsx" "F:\路径\dev_xxx.md"
+```
+
+`md` 参数可省略；路径含空格或中文**必须加引号**。加 `-o 报告名.txt` 可改输出文件名。
+
+### 诊断面板说了什么
+
 如果结果表里开发侧条目**全部**是「⚠️ 多余」、同时 SFA 侧大批「❌ 缺失」，
 那不是数据真的对不上，而是 **ID 关联链没建立**。根因必在两侧之一，页面提供两个自检面板：
 
@@ -205,6 +229,8 @@ test_pmi_core.py       内核回归（179 项：指标口径、关联链路、�
 test_ui_smoke.py       界面冒烟（29 项：AppTest 无头跑渲染分支 + 列口径 + 两个诊断面板）
 test_realdata.py       真实数据回归（锁端到端数值，语料缺失自动跳过）
 samples/               真实语料目录（不进版本控制，见 samples/README.md）
+诊断.bat               拖入 xlsx / xlsx+md 即跑 doctor.py，不用记命令行
+启动工具.bat           双击启动界面
 streamlit_launcher.py  启动器（规避 IDE 运行配置序列化差异）
 pmi_compare.py         早期版本，留档
 ```
