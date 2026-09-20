@@ -25,7 +25,7 @@ md.name    ==  SFA.draughting_callout.name == 关联表的 name
 |---|---|---|---|
 | `tessellated_annotation_occurrence` | 含 tessellated 呈现的导出 | `Associated Semantic PMI` | 一条标注一行 |
 | `draughting_model_item_association` | **非 tessellated 导出**（如 `nist_ctc_05-e1`） | `definition` | 一条 callout **多行**（几何引用 + 语义引用），须按 callout 聚合 |
-| （两者皆无） | **图形专用导出**（如 `nist_ftc_08-...-e1-tg`）：ta 表在但缺关联键列，且无语义表 | — | 无真值可比，开发侧判「⛔ 无可比真值」，须换报告 |
+| （两者皆无） | **图形专用变体**（`-tg` = tessellated geometry，模型文件里就只有图形 PMI）：ta 表在但缺关联键列，且无语义表 | — | 无真值可比，开发侧判「⛔ 无可比真值」，须换报告 |
 
 语义映射四条路径（均已在 `nist_ftc_07` / `nist_ftc_10` / `nist_ctc_01` / `nist_ctc_02` / `nist_ctc_05` NIST 测试件上实测打通）：
 
@@ -93,6 +93,29 @@ SFA 侧零真值，两侧没有共同基准，「多余 / 缺失」都无从谈�
   `Semantic PMI Summary` 的兄弟报告作为替代建议
   （实测 `nist_ftc_08_asme1_ap242-e1-tg-sfa.xlsx` → 指出
   `nist_ftc_08_asme1_ap242-e2-sfa.xlsx`）。
+
+**根因在模型文件本身，不在 SFA 的导出勾选。** `-tg` = **tessellated geometry**
+（三角化几何）变体，而且它和 `-e2` 是**两个不同的 `.stp` 文件** —— 同一个零件、
+同一套实体 ID，只是几何用三角面片替代了精确 B-rep。实测两者实体计数：
+
+| 实体 | `-e1-tg.stp` | `-e2.stp` |
+|---|---|---|
+| `DRAUGHTING_CALLOUT` | **0** | 52 |
+| `TOLERANCE_ZONE` / `TOLERANCE_VALUE` | **0** | 14 / 9 |
+| `DATUM` / `DATUM_FEATURE` | **0** | 11 / 11 |
+| `DIMENSIONAL_SIZE` / `DIMENSIONAL_LOCATION` | **0** | 9 / 1 |
+| `TESSELLATED_ANNOTATION_OCCURRENCE` | 60 | 52 |
+| `DRAUGHTING_MODEL_ITEM_ASSOCIATION` | 212 | 119 |
+
+它的关联链停在 `SHAPE_ASPECT('Flatness.1')` —— 语义侧只剩一个名字，往下只有
+`TESSELLATED_GEOMETRIC_SET` 的三角点。SFA 日志里那句 *Missing draughting_callout
+entity referring to tessellated_annotation_occurrence* 说的就是这件事。全文件检索
+找不到任何公差值，`-e2` 里同样的检索有 30 处。
+
+**查看器能「看到 PMI」≠ 文件里有语义 PMI**：ODA / SFA Viewer 渲染的是
+`TESSELLATED_ANNOTATION_OCCURRENCE` 那层图形（每条挂一个三角化几何集合），
+呈现出来就是图纸上那行字的样子。想读出 `.015` `⏥` 得从几何形状反推字形，
+而不是从数据模型取值 —— 本工具要的是后者，所以这类文件对它天然无真值。
 
 **基准目标的标识两侧常有干扰，不能按位置取首片段** —— 实测四种写法：
 
@@ -417,7 +440,7 @@ python doctor.py <xlsx> [md]     # 出问题时的一键诊断（不是测试，
 | `nist_ctc_05` | **非 tessellated 导出**：只有 `draughting_model_item_association`，一条 callout 多行 | 三率 100%，缺陷 8 条（全是符号丢失） |
 | `nist_ftc_08` + `-e2` 报告 | 4 个保存视图；52/52 handle 全对上 | 召回/精确 90.7%、基准 100%；缺陷 8 条 |
 | `nist_ctc_02` | 8 个基准目标同时挂在 `MBD_A` + `MBD_B` | 跨视图复用不报 DUP，多视图标记 8 个标注 |
-| `nist_ftc_08` + `-e1-tg` 报告 | **图形专用导出**：ta 表缺关联键列、无语义表 | 判「不可比」而非「多余」，并指出应改用 `-e2` |
+| `nist_ftc_08` + `-e1-tg` 报告 | **图形专用变体**（`-tg`，模型内就无语义 PMI）：ta 表缺关联键列、无语义表 | 判「不可比」而非「多余」，并指出应改用 `-e2` |
 
 > `ftc_08` 的两个变体是一对反例：同一测试件、同一份开发侧 markdown，
 > 换成 `-e1-tg` 报告就从「90.7%」变成「三项 N/A」——用例就是为了锁死
