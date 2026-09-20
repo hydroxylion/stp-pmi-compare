@@ -201,7 +201,8 @@ def main():
     head("3. ID 索引规模")
     out(f"语义表条目        : {len(t.semantic)}")
     out(f"draughting_callout: {len(t.dc)}")
-    out(f"图形标注(ta)      : {len(t.ta)}   (ta 表列数 {t.ta_cols})")
+    out(f"图形标注关联      : {len(t.ta)}   "
+        f"({t.link_channel or '两种关联表都缺失'}，{t.ta_cols} 列)")
     out(f"datum             : {len(t.datum)}")
     out(f"dcr               : {len(t.dcr_by_dim)}")
     out(f"单位              : {t.units or '未识别'}")

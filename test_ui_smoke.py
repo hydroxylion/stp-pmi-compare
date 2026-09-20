@@ -232,7 +232,9 @@ def main():
     check("自检面板 指出缺 handle", "handle" in errs, errs[:120])
 
     # ---------------- 报告体检面板 ----------------
-    at.session_state["sfa_stat"] = "语义表 12 项 · draughting_callout 13 条 · 图形标注 13 条（14 列）"
+    at.session_state["sfa_stat"] = (
+        "语义表 12 项 · draughting_callout 13 条 · 图形标注 13 条"
+        "（tessellated_annotation_occurrence） · datum 5 项 · dcr 6 项")
     at.session_state["sfa_warn"] = []
     at.session_state["sfa_checks"] = [
         {"name": "ta 列名识别", "ok": True, "value": "表头第 4 行", "detail": ""},
@@ -243,6 +245,13 @@ def main():
         "source": "header", "n_cols": 14, "n_rows": 13, "n_loaded": 13,
         "resolved": {"id": 0, "name": 1, "associated semantic pmi": 10,
                      "equivalent unicode string": 13},
+        "notes": [],
+    }, {
+        # DMIA 形态：行数 > 装载条数（一条 callout 多行），须显示聚合组数
+        "key": "ta", "sheet": "draughting_model_item_associati", "header_row": 2,
+        "source": "header", "n_cols": 6, "n_rows": 46, "n_loaded": 20,
+        "n_rows_grouped": 20,
+        "resolved": {"definition": 3, "identified_item": 5},
         "notes": [],
     }]
     at.session_state["link_stats"] = {"gt-1hop": 3, "none": 0}

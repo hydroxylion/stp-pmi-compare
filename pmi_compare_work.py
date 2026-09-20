@@ -599,14 +599,16 @@ if st.button("🚀 开始比对", type="primary"):
                 st.session_state.sfa_warn = list(truth.warnings)
                 st.session_state.sfa_stat = (
                     f"语义表 {len(truth.semantic)} 项 · draughting_callout {len(truth.dc)} 条 · "
-                    f"图形标注 {len(truth.ta)} 条（{truth.ta_cols} 列） · "
+                    f"图形标注 {len(truth.ta)} 条"
+                    f"（{truth.link_channel or '关联表缺失'}） · "
                     f"datum {len(truth.datum)} 项 · dcr {len(truth.dcr_by_dim)} 项"
                 )
                 st.session_state.sfa_checks = [ck.__dict__ for ck in truth.checks]
                 st.session_state.sfa_recipes = [
                     {"key": cr.key, "sheet": cr.sheet, "header_row": cr.header_row,
                      "source": cr.source, "n_cols": cr.n_cols, "n_rows": cr.n_rows,
-                     "n_loaded": cr.n_loaded, "resolved": cr.resolved, "notes": cr.notes}
+                     "n_loaded": cr.n_loaded, "n_rows_grouped": cr.n_rows_grouped,
+                     "resolved": cr.resolved, "notes": cr.notes}
                     for cr in truth.recipes
                 ]
                 st.session_state.link_stats = core.link_stats(rows)
@@ -699,7 +701,9 @@ if _sfa_stat or _checks:
                 "列来源": "表头识别" if r["source"] == "header" else "默认列号（脆弱）",
                 "表头行": (r["header_row"] + 1) if r["header_row"] >= 0 else "—",
                 "列数": r["n_cols"],
-                "数据行": r["n_rows"],
+                # DMIA 一条 callout 占多行，行数 > 装载条数是正常的，须标出聚合
+                "数据行": (f'{r["n_rows"]}（聚合为 {r["n_rows_grouped"]} 组）'
+                           if r.get("n_rows_grouped") else r["n_rows"]),
                 "装载": r["n_loaded"],
                 "用到的列": " · ".join(f"{k}={v}" for k, v in r["resolved"].items()),
                 "备注": "；".join(r["notes"]),
@@ -738,7 +742,11 @@ if _sfa_stat or _checks:
         if not _problems:
             st.caption(
                 "ID 关联靠这几张表打通：`draughting_callout.ID`（＝开发侧 handle）→ "
-                "`tessellated_annotation_occurrence` 的 `Associated Semantic PMI` 列 → 语义实体。"
+                "关联表的语义引用 → 语义实体。关联表有**两种等价形态**，取其一即可："
+                "`tessellated_annotation_occurrence`（含 tessellated 呈现，"
+                "引用在 `Associated Semantic PMI` 列）或 "
+                "`draughting_model_item_association`（非 tessellated 导出，"
+                "引用在 `definition` 列，一条 callout 多行需聚合）。"
                 "其中 GT 1 跳、尺寸经 `dimensional_characteristic_repr` 2 跳、"
                 "基准经 `datum_feature` 1 跳（旧报告 ID 相邻时走 2 跳兜底）、基准目标 1 跳。"
             )
@@ -871,7 +879,8 @@ if st.session_state.rows:
 
         st.caption(
             f"关联方式：实体 ID 精确关联（handle/name → SFA `draughting_callout` → "
-            f"`tessellated_annotation_occurrence` → 语义表），非字符串相似度。　"
+            f"关联表（tessellated_annotation_occurrence 或 "
+            f"draughting_model_item_association）→ 语义表），非字符串相似度。　"
             f"开发条目 {meta.get('开发条目', 0)} 条 / SFA 语义项 {meta.get('SFA语义项', 0)} 项 / "
             f"报告工作表 {meta.get('SFA表数', 0)} 张。　"
             f"口径：标注(label/note)类完全不进 PMI 分母，仅单列统计；"

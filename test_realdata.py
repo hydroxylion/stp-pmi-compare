@@ -39,6 +39,17 @@ CASES = [
         "defects": 0,
         "defect_codes": {},
     },
+    {
+        # 非 tessellated 导出（ctc_05-e1）：报告里**没有**
+        # `tessellated_annotation_occurrence`，只有 `draughting_model_item_association`。
+        # 旧代码只认前者 → t.ta 全空 → 指标 0%，而装载 / 引用 / name 三项交叉校验全绿。
+        # 用例锁死这条等价通道，以及「一条 callout 多行需聚合」的装载校验口径。
+        "md": "samples/dev_ctc_05.md",
+        "xlsx": "nist_ctc_05_asme1_ap242-e1-sfa.xlsx",
+        "recall": 100.0, "precision": 100.0, "datum": 100.0,
+        "defects": 8,
+        "defect_codes": {"SYM 符号丢失": 8},
+    },
 ]
 
 FAIL = []

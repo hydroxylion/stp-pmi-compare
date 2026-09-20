@@ -1173,6 +1173,170 @@ check("基准目标漂移 体检项通过",
 
 
 # ============================================================
+# 七、DMIA 关联通道（非 tessellated 导出）/ ◎ 与 ⭩◎ 的区分
+#     覆盖 ctc_05-e1 的整批失配：该报告**没有** tessellated_annotation_occurrence
+#     表，只有 draughting_model_item_association。旧代码只认前者 → t.ta 全空 →
+#     开发侧全判「多余」、SFA 侧全判「缺失」，指标 0%，
+#     而装载 / 引用 / name 三项交叉校验**全绿** —— 比「整表装载 0 条」更隐蔽。
+#     DMIA 与 ta 同角色但结构不同：一条 callout 有多行（几何引用 + 语义引用），
+#     必须按 callout 聚合，装载校验的分母也要跟着变成「分组合数」，
+#     否则 6 行 → 3 组会被误判成「列定位错位」。
+# ============================================================
+def _build_sfa_dmia(tmpdir: str) -> str:
+    """只给 DMIA、不给 tessellated 表的报告（ctc_05-e1 的形态）。"""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    ws = wb.create_sheet("Semantic PMI Summary")
+    ws.append(["Semantic PMI Summary (3)", None, None, None])
+    ws.append(["ID", "Entity", "Expected PMI", "Similar"])
+    for rid, ent, txt in [
+        (4001, "position_tolerance", "⌖ | ⌀0.8 | A"),
+        (4002, "placed_datum_target_feature", "1.25x2\nC1"),
+        (4003, "dimensional_characteristic_representation", "⌀10.000 ± .001"),
+    ]:
+        ws.append([str(rid), ent, txt, None])
+
+    ws = wb.create_sheet("draughting_callout")
+    ws.append(["draughting_callout  (3)", None])
+    ws.append(["ID", "name"])
+    for rid, nm in [(4001, "Position.1"), (4002, "Datum Target C1 (15)"),
+                    (4003, "Vertical Dimension (28)")]:
+        ws.append([str(rid), nm])
+
+    # 一条 callout 两行：一行给几何引用（shape_aspect），一行给语义引用
+    ws = wb.create_sheet("draughting_model_item_associati")
+    ws.append(["draughting_model_item_association  (6)"] + [None] * 5)
+    ws.append(["ID", "name", "description", "definition", "used_representation",
+               "identified_item"])
+    for rid, tgt, dfn in [
+        (501, 4001, "shape_aspect 5001"),
+        (502, 4001, "position_tolerance 4001"),
+        (503, 4002, "shape_aspect 5002"),
+        (504, 4002, "placed_datum_target_feature 4002"),
+        (505, 4003, "shape_aspect 5003"),
+        (506, 4003, "dimensional_size 6003"),
+    ]:
+        ws.append([str(rid), "", "", dfn, "draughting_model 99",
+                   f"draughting_callout {tgt}"])
+
+    # shape_aspect 是 DMIA 必带的几何引用，须登记成「合法但无语义」的实体
+    ws = wb.create_sheet("shape_aspect")
+    ws.append(["shape_aspect  (3)", None])
+    ws.append(["ID", "name"])
+    for rid in (5001, 5002, 5003):
+        ws.append([str(rid), ""])
+
+    ws = wb.create_sheet("dimensional_characteristic_repr")
+    ws.append(["dimensional_characteristic_representation  (1)"] + [None] * 2)
+    ws.append(["ID", "dimension", "representation"])
+    ws.append(["4003", "dimensional_size 6003", "shape_dimension_representation 7001"])
+
+    path = os.path.join(tmpdir, "dmia_sfa.xlsx")
+    wb.save(path)
+    return path
+
+
+def _build_sfa_nolink(tmpdir: str) -> str:
+    """两种关联表都没有的报告：必须显式报断链，不能静默出 0% 结果。"""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("Semantic PMI Summary")
+    ws.append(["Semantic PMI Summary (1)", None, None, None])
+    ws.append(["ID", "Entity", "Expected PMI", "Similar"])
+    ws.append(["4001", "position_tolerance", "⌖ | ⌀0.8 | A", None])
+    ws = wb.create_sheet("draughting_callout")
+    ws.append(["draughting_callout  (1)", None])
+    ws.append(["ID", "name"])
+    ws.append(["4001", "Position.1"])
+    path = os.path.join(tmpdir, "nolink_sfa.xlsx")
+    wb.save(path)
+    return path
+
+
+_DMIA_MD = """# PMI 提取结果
+
+## MBD_A
+
+- 标注数量：3 条
+
+### 1. ⌖ ⌀0.8 A
+
+detailData:
+{
+  "handle": "4001",
+  "name": "Position.1",
+  "type": "position_tolerance"
+}
+
+### 2. C1
+
+detailData:
+{
+  "handle": "4002",
+  "datum": "C",
+  "name": "Datum Target C1 (15)",
+  "target id": "1",
+  "type": "placed_datum_target_feature"
+}
+
+### 3. ⌀10.000 ±.001
+
+detailData:
+{
+  "handle": "4003",
+  "name": "Vertical Dimension (28)",
+  "type": "dimensional_size"
+}
+"""
+
+with tempfile.TemporaryDirectory() as _td_dm:
+    _dmia = C.load_sfa(_build_sfa_dmia(_td_dm))
+    _dmia_items, _ = C.parse_dev_markdown_ex(_DMIA_MD)
+    _dmia_rows = C.match_items(_dmia, _dmia_items)
+    _dmia_m = C.compute_metrics(_dmia_rows)
+    _nolink = C.load_sfa(_build_sfa_nolink(_td_dm))
+
+check("DMIA 通道被识别", _dmia.link_channel, C.LINK_DMIA)
+check("DMIA ta 条数 = callout 数（按 callout 聚合，不是行数）", len(_dmia.ta), 3)
+check("DMIA 一条 callout 的多行引用被合并",
+      _dmia.ta["Position.1"]["sem_refs"], [5001, 4001])
+check("DMIA 装载校验的分母是分组合数",
+      [c.value for c in _dmia.checks if c.name.endswith("draughting_model_item_associati 装载")],
+      ["3/3 条，聚合为 3 组"])
+check("DMIA 交叉校验全通过", [b.line() for b in _dmia.broken_checks()], [])
+check("DMIA 引用可解释（几何引用已登记为合法实体）",
+      [c.value for c in _dmia.checks if c.name == "ta 引用可解释"], ["6/6 = 100%"])
+check("DMIA 三条开发条目全部命中",
+      [r.status for r in _dmia_rows if r.dev_name], [C.ST_HIT] * 3)
+check("DMIA 关联路径齐全",
+      sorted({r.path for r in _dmia_rows}),
+      ["datum_target-1hop", "dim-2hop", "gt-1hop"])
+check("DMIA 三项指标 100",
+      (round(_dmia_m.recall, 2), round(_dmia_m.precision, 2),
+       round(_dmia_m.datum_coverage, 2)), (100.0, 100.0, 100.0))
+
+check("无关联通道时体检报错而非静默",
+      [c.name for c in _nolink.broken_checks()], ["图形标注关联通道"])
+check("无关联通道时给出明确告警",
+      any("两种图形标注关联表都没有" in w for w in _nolink.warnings), True)
+
+# 同心度符号：`⭩◎` 是复合公差的渲染产物，其中的 ◎ 与同心度无关；
+# 独立出现的 ◎（ctc_05 `◎ | ⌀0.03 | A`）才是真符号。
+check("◎ 独立出现算同心度符号",
+      sorted(C.symbols_of("◎ | ⌀0.03 | A")), ["⌀", "◎"])
+check("⭩◎ 渲染产物不算符号",
+      sorted(C.symbols_of("⭩◎ | ⌓ | 1.5 | A")), ["⌓"])
+# ASME 的 Unicode 形位公差写法：圆跳动 ↗、全跳动 ⌰、圆度 ○
+check("新增 ASME 符号被识别（圆跳动/全跳动/圆度）",
+      sorted(C.symbols_of("↗ | 0.035 | A-B") | C.symbols_of("⌰ | 0.015 | B")
+             | C.symbols_of("○ | 0.002")),
+      ["↗", "⌰", "○"])
+
+
+# ============================================================
 # 汇总
 # ============================================================
 for f in FAIL:

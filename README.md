@@ -16,29 +16,36 @@ SFA 解析的是 STEP 里的语义 PMI，**不包含非语义信息**（图形�
 
 ```
 md.handle  ==  SFA.draughting_callout.ID
-md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurrence.name
+md.name    ==  SFA.draughting_callout.name == 关联表的 name
 ```
 
-语义映射四条路径（均已在 `nist_ftc_07` / `nist_ftc_10` / `nist_ctc_01` / `nist_ctc_02` NIST 测试件上实测打通）：
+标注 ↔ 语义实体有**两个等价通道**，报告里有哪个就用哪个（体检面板会标明用了哪个）：
+
+| 通道 | 出现场景 | 关联键所在列 | 形态 |
+|---|---|---|---|
+| `tessellated_annotation_occurrence` | 含 tessellated 呈现的导出 | `Associated Semantic PMI` | 一条标注一行 |
+| `draughting_model_item_association` | **非 tessellated 导出**（如 `nist_ctc_05-e1`） | `definition` | 一条 callout **多行**（几何引用 + 语义引用），须按 callout 聚合 |
+
+语义映射四条路径（均已在 `nist_ftc_07` / `nist_ftc_10` / `nist_ctc_01` / `nist_ctc_02` / `nist_ctc_05` NIST 测试件上实测打通）：
 
 | 类别 | 路径 | 跳数 |
 |---|---|---|
-| GT / FCF | `ta.col11` 末尾 ID → 语义表 ID | 1 |
-| DIM | `ta.col11` 的 dimensional_size / _location / angular_location ID → `dcr.dimension` 匹配 → `dcr.ID` → 语义表 ID | 2 |
-| datum | `ta.col11` 的 ID → `datum_feature.ID` → `datum_feature.Datum`（基准字母） | 1 |
-| datum_target | `ta.col11` 直接给出基准目标实体 ID → 语义表 ID | 1 |
+| GT / FCF | 关联表的语义引用 ID → 语义表 ID | 1 |
+| DIM | 关联表的 dimensional_size / _location / angular_location ID → `dcr.dimension` 匹配 → `dcr.ID` → 语义表 ID | 2 |
+| datum | 关联表的 ID → `datum_feature.ID` → `datum_feature.Datum`（基准字母） | 1 |
+| datum_target | 关联表直接给出基准目标实体 ID → 语义表 ID | 1 |
 
-> `ta` = `tessellated_annotation_occurrence`。**列位置一律按表头列名定位，不写死列号** ——
-> SFA 的列数与列序会随版本和导出勾选变化（实测 `ta` 表 12~14 列、`dcr` 表 17~20 列）。
-> 关联键用 `Associated Semantic PMI` 列；`Equivalent Unicode String(s)` 是图形文本通道，
-> 属可选列：**缺它不影响关联**，只是「SFA图形文本」列会为空、内容比对回落到语义表文本。
-> 导出时勾上该列可获得最精确的按字形比对。
+> **列位置一律按表头列名定位，不写死列号** —— SFA 的列数与列序会随版本和导出勾选变化
+> （实测 tessellated 表 12~14 列、`dcr` 表 17~20 列）。
+> `Equivalent Unicode String(s)` 是图形文本通道，属可选列：**缺它不影响关联**，
+> 只是「SFA图形文本」列会为空、内容比对回落到语义表文本。
+> `draughting_model_item_association` 通道**没有**该列，图形文本列必然为空。
 
 **ID 不能靠位数或算术猜。** 踩过两次同源坑，现在两条规则都写进了回归测试：
 
 - **不写死 ID 位数。** `Associated Semantic PMI` 列的值形如 `dimensional_size 120`。
   早期用 `\d{4,7}` 抠 ID —— NIST FTC 系列实体 ID 恰好是 4~7 位，一直正常；
-  换到 CTC 系列（ID 只有 2~3 位）直接抠不出东西，`dcr` 整表装载 0 条、`ta` 引用全空，
+  换到 CTC 系列（ID 只有 2~3 位）直接抠不出东西，`dcr` 整表装载 0 条、关联表引用全空，
   表现就是**全量失配 0%，且不报任何错**。现在改为「不猜位数、只排除括号序号与小数」。
 - **不用 `ID ± 1` 推实体。** `datum.ID` 与 `datum_feature.ID`、`dimensional_size.ID` 与
   `dcr.dimension` 都是各自独立编号，只是**碰巧**在 FTC 系列里相邻。
@@ -48,10 +55,16 @@ md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurre
   `ID - 1` 只作为旧报告的兜底路径。
 - **实体名不做单值匹配。** 同一个实体在不同报告里写法不同：基准目标在 `ftc_10` 里
   叫 `datum_target`，在 `ctc_02 / ctc_05 / ftc_06` 里叫 `placed_datum_target_feature`。
-  只认一种写法时，`ta` 引用完全能落到语义表（装载与引用校验全绿、体检看不出异样），
+  只认一种写法时，引用完全能落到语义表（装载与引用校验全绿、体检看不出异样），
   但判据不认实体名 → 开发侧全判「多余」、SFA 侧全判「缺失」。
   现在按「含 `datum` 且含 `target`」的宽松判据识别，并在体检面板加了一项
   **语义表实体归类**：出现未识别的实体名会直接告警。
+- **关联表不做单表匹配。** 报告可能**没有** `tessellated_annotation_occurrence`，
+  只有 `draughting_model_item_association`（实测 18 份 NIST 报告里 17 份有前者、
+  `ctc_05-e1` 只有后者）。只认前者 → 关联表索引全空 → 指标 0%，
+  而**装载 / 引用 / name 三项交叉校验全绿** —— 这是最隐蔽的一类静默失配。
+  现在两种通道自动择一，并在体检面板加了一项 **图形标注关联通道**：
+  两种表都缺才算断链。
 
 **基准目标的标识两侧常有干扰，不能按位置取首片段** —— 实测四种写法：
 
@@ -132,7 +145,7 @@ cd /d "C:\Users\hui_ou\Desktop\STP比对工具"
 | 段 | 内容 |
 |---|---|
 | ① 装载与列定位 | 每张表的列数、表头行、**用到的列是怎么定位的**；来源显示「默认列号（脆弱）」说明该表没识别出表头 |
-| ② 交叉校验 | 表内数据行数 vs 实际装载条数、`ta` 引用能否落地、`dc` 与 `ta` 的 name 是否一一对应、**语义表实体名是否全部可归类** |
+| ② 交叉校验 | 表内数据行数 vs 实际装载条数、**图形标注关联通道是哪一个（两种都缺即断链）**、关联引用能否落地、`dc` 与关联表的 name 是否一一对应、**语义表实体名是否全部可归类** |
 | ③ 关联路径分布 | `gt-1hop / dim-2hop / datum_feature-1hop / datum-2hop / datum_target-1hop / entity-no-semantic / none` 各多少条（界面显示中文释义） |
 | ④ 疑似对应 | 关联失败条目的模糊匹配候选，**仅供参考，不进任何指标** |
 | ⑤ 多视图复用 | 同一标注挂在多个保存视图下（开发侧会导出多条），**非缺陷、不影响指标**，单列以免与 `DUP` 混淆 |
@@ -147,9 +160,13 @@ cd /d "C:\Users\hui_ou\Desktop\STP比对工具"
 
 **② 加载期交叉校验** — 不依赖列语义，只看「读到没有、数量对不对、引用能否落地」：
 
-- 表内数据行数 vs 装载条数（整表被跳过时直接报出，比结果表全红更早）
-- `ta` 引用中「既不在语义表、也不在 dcr / datum 索引」的比例
-- `dc` 的 name 与 `ta` 的 name 对应率
+- **图形标注关联通道**：`tessellated_annotation_occurrence` 与
+  `draughting_model_item_association` 至少有一个；两种都缺时直接报断链
+  （否则下游所有统计都是空的「假绿」）
+- 表内数据行数 vs 装载条数（整表被跳过时直接报出，比结果表全红更早）；
+  多行聚合成一条的表（DMIA）用**分组合数**当分母，不误报「装载不足」
+- 关联引用中「既不在语义表、也不在 dcr / datum 索引」的比例
+- `dc` 的 name 与关联表的 name 对应率
 - 语义表里出现的实体名能否全部归入已知类别（新写法会直接点名，
   避免像 `placed_datum_target_feature` 那样「引用能落地、判据不认」的隐性断链）
 
@@ -165,11 +182,18 @@ ID 索引规模、交叉校验逐项结果、装载告警、**未收录字符清
 关联路径分布、三项指标、缺陷清单、多视图复用标注、疑似对应、全部非命中条目。
 
 > 「未收录字符」这一段专门用来看 SFA 有没有引入新的字形。但要区分两类：
-> 真公差符号（如 `⌭` 圆柱度、`⌯` 对称度、`−` 直线度）要补进符号表；
-> **SFA 的排版字形**（`▽` `⎹` `⭩` `◁` `⌮` `◎`）**不能**补 —— 它们在带基准的
+> 真公差符号（如 `⌭` 圆柱度、`⌯` 对称度、`−` 直线度、`↗` 圆跳动、`⌰` 全跳动、
+> `○` 圆度、`⌒` 线轮廓、`∠` 倾斜度、`◎` 同心度）要补进符号表；
+> **SFA 的排版字形**（`▽` `⎹` `⭩` `◁` `⌮`）**不能**补 —— 它们在带基准的
 > 框架里与 `[A]` 同行，属版面元素，收进符号表会让「缺符号」检查误报一片。
+>
+> `◎` 是特例：独立出现时是同心度符号（`ctc_05` 的 `◎ | ⌀0.03 | A`），
+> 但 SFA 在复合公差里会写成 `⭩◎`（`⭩` 是字体私有区字形），那里的 `◎` 与同心度无关。
+> `symbols_of()` 会把 `⭩◎` 整对剥离后再判符号。
 
-**遗留的两类无法根治，只能保证快速发现**：新 GD&T 符号与渲染字形（白名单机制）、
+**遗留的两类无法根治，只能保证快速发现**：新 GD&T 符号与渲染字形（白名单机制；
+例如 `Ⓕ` 自由状态、`Ⓣ` 相切平面、`Ⓘ` 独立原则这类**修饰符字母**尚未收录，
+出现在报告里时 doctor 会点名，需要人工判断后再补）、
 开发侧 markdown 格式演进（解析自检会显式报出，不再静默全红）。
 
 ## 内容比对的分段口径
@@ -198,7 +222,7 @@ ID 索引规模、交叉校验逐项结果、装载告警、**未收录字符清
 | 基准层（单列） | SFA `datum` 表 vs md 基准标注 | 独立统计 |
 | 非语义 / 注释层（单列） | label / note 类；**SFA 未导出语义值的尺寸** | 否 |
 
-「SFA 未导出语义值的尺寸」指：`ta` 的引用落在 `dimensional_size` / `dimensional_location`
+「SFA 未导出语义值的尺寸」指：关联表的引用落在 `dimensional_size` / `dimensional_location`
 这类**只有实体、没有语义值**的表上（图纸上是个未赋值的尺寸 / 位置）。
 双侧都拿不出可比内容，所以归注释层而不是判「多余」—— 否则会凭空压低精确率。
 判据是「引用落在实体表上」，所以**开发侧漏提真值的情况仍会被抓出来**：
@@ -252,7 +276,9 @@ PyCharm 中直接运行 `pmi_compare_work.py` 也可以 —— 脚本内置 bare
 
 ## 使用流程
 
-1. 用 SFA 导出 xlsx 报告（需包含 Semantic PMI Summary / tessellated_annotation_occurrence / draughting_callout 等表）。
+1. 用 SFA 导出 xlsx 报告。必需表：Semantic PMI Summary、draughting_callout；
+   关联表两种形态**有其一即可** —— `tessellated_annotation_occurrence`（勾了呈现）
+   或 `draughting_model_item_association`。
 2. 在页面左侧上传 SFA xlsx。
 3. 上传或粘贴内部项目导出的 markdown。
 4. 查看三层指标、结果明细表、以及「🔧 提取缺陷清单」。
@@ -273,7 +299,8 @@ PyCharm 中直接运行 `pmi_compare_work.py` 也可以 —— 脚本内置 bare
 
 `SFA图形文本` 默认收起的原因：它依赖导出时勾选 Graphic Presentation PMI，
 日常核查用 `SFA语义文本` 即可；只有内容比对出现差异、需要区分「语义值不同」与
-「图纸文字渲染不同」时才需要它。
+「图纸文字渲染不同」时才需要它。非 tessellated 导出
+（`draughting_model_item_association` 通道）本来就没有这一列，该列会恒为空。
 
 其他约定：
 
@@ -290,9 +317,9 @@ PyCharm 中直接运行 `pmi_compare_work.py` 也可以 —— 脚本内置 bare
 pmi_core.py            比对内核：真值装载 / markdown 解析 / 归一化 / ID 关联 / 指标 / 缺陷检测
 pmi_compare_work.py    Streamlit 界面（当前主入口）
 doctor.py              一键诊断：结果不对劲时跑一次，产出完整上下文报告
-test_pmi_core.py       内核回归（216 项：指标口径、关联链路、缺陷检测、解析自检、列名驱动、ID 位数与基准通道、多视图复用、实体名漂移）
+test_pmi_core.py       内核回归（230 项：指标口径、关联链路、缺陷检测、解析自检、列名驱动、ID 位数与基准通道、多视图复用、实体名漂移、DMIA 通道）
 test_ui_smoke.py       界面冒烟（40 项：AppTest 无头跑渲染分支 + 列口径 + 字段勾选开关 + 两个诊断面板）
-test_realdata.py       真实数据回归（28 项，锁端到端数值，语料缺失自动跳过）
+test_realdata.py       真实数据回归（37 项，锁端到端数值，语料缺失自动跳过）
 samples/               真实语料目录（不进版本控制，见 samples/README.md）
 诊断.bat               纯 ASCII + CRLF：拖入 xlsx / xlsx+md 即跑 doctor.py
 启动工具.bat           双击启动界面（UTF-8 + chcp 65001，CRLF）
@@ -313,7 +340,8 @@ python doctor.py <xlsx> [md]     # 出问题时的一键诊断（不是测试，
 
 > `test_pmi_core.py` 的列名驱动与 CTC 场景用例是**现场用 openpyxl 构造**的报告
 > （列序全部打乱、表头带换行与 `(Sec. x)`、实体 ID 用 2~3 位数、基准两套 ID 不相邻、
-> 基准目标实体名用 `placed_datum_target_feature`），不依赖外部数据文件，可离线跑。
+> 基准目标实体名用 `placed_datum_target_feature`、只给 DMIA 不给 tessellated 表），
+> 不依赖外部数据文件，可离线跑。
 
 真实数据回归当前锁三个测试件（语料见 `samples/README.md`）：
 
@@ -321,6 +349,7 @@ python doctor.py <xlsx> [md]     # 出问题时的一键诊断（不是测试，
 |---|---|---|
 | `nist_ftc_10` | 实体 ID 4 位数，`datum` 与 `datum_feature` 恰好相邻 | 三率 100%，缺陷 6 条 |
 | `nist_ctc_01` | 实体 ID 2~3 位数，基准两套 ID 差 3，含未赋值尺寸 | 三率 100%，缺陷 0 条 |
+| `nist_ctc_05` | **非 tessellated 导出**：只有 `draughting_model_item_association`，一条 callout 多行 | 三率 100%，缺陷 8 条（全是符号丢失） |
 | `nist_ctc_02` | 8 个基准目标同时挂在 `MBD_A` + `MBD_B` | 跨视图复用不报 DUP，多视图标记 8 个标注 |
 
 > `ctc_02` 用例的开发侧条目不是真实导出，而是**按 SFA 的 `Saved Views` 列反推**

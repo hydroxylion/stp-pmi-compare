@@ -11,13 +11,21 @@ PMI 比对核心模块
 关联链路（均已用 nist_ftc_07 NIST 测试件实测验证）::
 
     md.handle  ==  SFA.draughting_callout.ID
-    md.name    ==  SFA.draughting_callout.name  ==  SFA.tessellated_annotation_occurrence.name
+    md.name    ==  SFA.draughting_callout.name  ==  关联表的 name（见下）
 
-    语义映射三条路径：
-      GT / FCF : ta.col11 末尾 ID                             -> 语义表 ID      (1 跳)
-      DIM      : ta.col11 的 dimensional_size / _location ID
+    标注 ↔ 语义实体有两个等价通道，取其一即可（SfaTruth.link_channel 标明用了哪个）：
+      a) tessellated_annotation_occurrence —— 一条标注一行，
+         `Associated Semantic PMI` 列直接给语义引用（AP242 含 tessellated 呈现）
+      b) draughting_model_item_association —— 非 tessellated 导出（如 ctc_05-e1），
+         `identified_item` = draughting_callout N，`definition` 给关联实体，
+         一条 callout 多行，须按 callout 聚合
+
+    语义映射四条路径：
+      GT / FCF : 关联表 → 末尾 ID                              -> 语义表 ID      (1 跳)
+      DIM      : 关联表 → dimensional_size / _location ID
                     -> dcr.dimension 匹配 -> dcr.ID            -> 语义表 ID      (2 跳)
-      datum    : ta.col11 末尾形貌 ID - 1 -> datum.ID          -> datum.identification (2 跳)
+      datum    : 关联表 → datum_feature.ID                     -> 基准字母       (1 跳)
+      datum_target : 关联表 → datum_target 实体 ID              -> 语义表 ID      (1 跳)
 
 指标分层（口径已确认）：
   * 语义 PMI 层（主指标）：几何公差 + 尺寸公差；非语义项不进 precision 分母
@@ -457,15 +465,19 @@ _SYM_ALIAS = {"⊥": "⟂", "⏊": "⟂", "⊿": "⌓", "⫽": "∥", "⏥": "�
               "∅": "⌀", "Ø": "⌀", "Φ": "⌀", "φ": "⌀", "ø": "⌀", "⭩": ""}
 # GD&T 符号全集（SFA 语义/图形通道实际用到的形位公差符号）。
 # 直线度在 SFA 里渲染为 U+2212 `−`（全报告仅此一处出现，不与负号混淆）。
-# 不收录 `◎`：SFA 把它写成 `⭩◎` 这类渲染产物（SYMBOL_MAP 里已判为杂符），
-# 收录会造成「缺符号 ◎」假报。
-_FCF_CHARS = set("⌓⌖⟂∥▱⏥⌭⌯−")
+# `↗`/`⌰`/`○`/`⌒`/`∠` 是 ASME 的 Unicode 形位公差符号表里给出的写法，实测
+# SFA 确实这么用（ctc_05 圆跳动 `↗ | 0.035 | A-B`、全跳动 `⌰ | 0.015 | B`、
+# 圆度 `○ | 0.002`、ctc_02 线轮廓 `⌒ | 0.25`、ctc_03 倾斜度 `∠ | 0.04 | A`）。
+# 不收录会让这些符号「既不被识别、也不被报为未知」，开发侧丢了也查不出来。
+# `◎` 是同心度符号，但要与 `⭩◎` 渲染产物区分 —— 见 symbols_of() 里的剥离。
+_FCF_CHARS = set("⌓⌖⟂∥▱⏥⌭⌯−↗⌰○⌒∠◎")
 _DIA_CHARS = set("⌀")
 # SFA 文本化标注区块时用的排版字形：分隔、填充、区块标记，**不是** GD&T 符号。
 # 不能收录进 _FCF_CHARS —— 收录会让「缺符号」检查把它们当成必须出现的符号而误报
 # （实测 `▽`/`⎹` 各出现 15 次，全在带基准的 FCF 里、与 `[A]` 同行，属版面元素）。
+# `⭩` 是复合公差里的私有区字形，`⌮` 是复合公差的重合符号，都不参与符号比对。
 # 这里登记只为让 doctor 不再把它们报成「未收录字符」，保留对真新字符的发现能力。
-SFA_LAYOUT_GLYPHS = set("▽⎹◁⌮◎⭩")
+SFA_LAYOUT_GLYPHS = set("▽⎹◁⌮⭩")
 _RAD_PREFIX = re.compile(r"(?<![A-Za-z])R\s*(?=[.\d])")
 _SR_PREFIX = re.compile(r"(?<![A-Za-z])S\s*(?=[⌀.])")
 # 数量前缀可能不在串首（SFA 图形文本形如 `DIM | 4X ⌀.250`），也常用 `×` 而非 `X`
@@ -531,8 +543,15 @@ def repaired_text(s: str) -> str:
 
 
 def symbols_of(text: str) -> set:
-    """抽取用于比对的图形符号集合（含直径符 / 半径符 / 球面符）。"""
-    s = "".join(_SYM_ALIAS.get(ch, ch) for ch in str(text or ""))
+    """抽取用于比对的图形符号集合（含直径符 / 半径符 / 球面符）。
+
+    入参必须是**原文**（it_view 不做归一化就是为了这个）：归一化会把 `⌀` 变成 `D`，
+    符号就丢了。`⭩◎` 要在这里整对剥离 —— SFA 用私有区字形 `⭩` + `◎` 渲染复合公差，
+    其中的 `◎` 与同心度无关，不剥离会在 ftc 系列造成「缺符号 ◎」假报；
+    而独立出现的 `◎`（ctc_05 的 `◎ | ⌀0.03 | A`）是真同心度符号，要参与比对。
+    """
+    s = str(text or "").replace("⭩◎", "")
+    s = "".join(_SYM_ALIAS.get(ch, ch) for ch in s)
     out = {ch for ch in s if ch in _FCF_CHARS or ch in _DIA_CHARS}
     if _RAD_PREFIX.search(s):
         out.add("R")
@@ -629,6 +648,10 @@ class ColRecipe:
     n_cols: int = 0
     n_rows: int = 0                     # 该表 ID 列为数字的数据行数
     n_loaded: int = 0                   # 实际装载条数
+    # 多行聚合成一条的表（draughting_model_item_association：一条 callout 多行，
+    # 分别指向几何与语义实体）—— 聚合后的组数。装载校验要用它当分母，
+    # 否则 46 行 → 20 条会被误判成「列定位错位」。
+    n_rows_grouped: int = 0
     notes: List[str] = field(default_factory=list)
 
     @property
@@ -724,16 +747,30 @@ TA_ALIASES = ("id", "name", "associated semantic pmi", "equivalent unicode strin
               "validation properties")
 TA_WANTS, TA_DEFAULT = ("id", "name", "associated semantic pmi",
                         "equivalent unicode string"), (0, 1, 10, 13)
+# draughting_model_item_association：**非 tessellated 导出**（如 ctc_05-e1）的图形标注
+# 关联表。与 ta 表同角色，但结构不同：
+#   identified_item = `draughting_callout 267`  ← 关联键（=开发侧 handle）
+#   definition      = `placed_datum_target_feature 1103` / `shape_aspect 1016`
+#   used_representation = `draughting_model 99`
+# 一条 callout **有多行**：既指向纯几何（shape_aspect），也指向真正的语义实体，
+# 必须按 callout 聚合，不能一行一条。
+DMIA_ALIASES = ("id", "definition", "used_representation", "identified_item")
+DMIA_WANTS, DMIA_DEFAULT = ("definition", "identified_item"), (3, 5)
+# 关联通道名（写进 SfaTruth.link_channel，供体检面板与 doctor 显示）
+LINK_TA   = "tessellated_annotation_occurrence"
+LINK_DMIA = "draughting_model_item_association"
 DATUM_ALIASES, DATUM_WANTS, DATUM_DEFAULT = (
     ("id", "identification"), ("id", "identification"), (0, 5))
 # datum_feature 表：ID -> 基准字母（列名就叫 `Datum`）。这是 ta 里 `Simple Datum.n`
 # 引用落地的唯一通道 —— datum 表的 ID 与它不同源。
 DF_ALIASES, DF_WANTS, DF_DEFAULT = (("id", "datum"), ("id", "datum"), (0, 5))
 DCR_ALIASES, DCR_WANTS, DCR_DEFAULT = (("id", "dimension"), ("id", "dimension"), (0, 1))
-# 无语义文本的实体表（尺寸 / 位置 / 尺寸表示）：只用来登记「这个 ID 真实存在」，
+# 无语义文本的实体表（尺寸 / 位置 / 尺寸表示 / 形貌）：只用来登记「这个 ID 真实存在」，
 # ta 引用了它们算合法，只是没有语义条目可比 —— 不该被当成「引用无法解释」。
+# `shape_aspect` 是 DMIA 通道（draughting_model_item_association）必带的一列几何引用，
+# 不登记会让「引用可解释」比例被几何引用拉低到 57%，从而误报断链。
 ENTITY_ONLY_TABLES = ("dimensional_size", "dimensional_location",
-                      "shape_dimension_representation")
+                      "shape_dimension_representation", "shape_aspect")
 
 
 @dataclass
@@ -744,7 +781,11 @@ class SfaTruth:
     datum: Dict[int, Dict[str, Any]] = field(default_factory=dict)      # datum.ID -> item
     dc: Dict[int, str] = field(default_factory=dict)                    # draughting_callout.ID -> name
     ta: Dict[str, Dict[str, Any]] = field(default_factory=dict)         # name -> {id, sem_refs, text}
-    ta_cols: int = 0                                                    # ta 表实际列数（图形文本通道判定）
+    ta_cols: int = 0                                                    # 关联表实际列数（图形文本通道判定）
+    # 图形标注关联通道：`tessellated_annotation_occurrence`（AP242 含 tessellated 呈现）
+    # 或 `draughting_model_item_association`（非 tessellated 导出，如 ctc_05-e1）。
+    # 两者取其一即可；都缺才算断链。
+    link_channel: str = ""
     dcr_by_dim: Dict[int, int] = field(default_factory=dict)            # dimensional_*.ID -> dcr.ID
     # datum_feature.ID -> 基准字母。"datum.ID" 与 "datum_feature.ID" 是两套 ID，
     # 两者**不保证相邻**（FTC 系列恰好差 1，CTC 系列实测差 3），所以必须按 ID 精确映射，
@@ -888,12 +929,19 @@ def load_sfa(path: str) -> SfaTruth:
         if cr:
             cr.n_loaded = len(t.dc)
 
-    # --- 3. tessellated_annotation_occurrence：name -> 语义引用 + 图形文本
+    # --- 3. 图形标注关联通道：name -> 语义引用（+ 图形文本）
+    # 同一份语义数据有两种导出形态，取其一即可：
+    #   a) tessellated_annotation_occurrence（含 tessellated 呈现）
+    #      一条标注一行，`Associated Semantic PMI` 直接给语义引用
+    #   b) draughting_model_item_association（**非 tessellated 导出**，如 ctc_05-e1）
+    #      一条 callout 多行，`identified_item` = draughting_callout N，
+    #      `definition` = 关联实体（同时含 shape_aspect 这类纯几何引用）
+    # 只认 (a) 会让 (b) 的报告整条通道断掉：t.ta 全空 → 开发侧全判「多余」、
+    # SFA 侧全判「缺失」，指标 0%，而装载 / 引用 / name 三项交叉校验**全绿**。
+    # 实测 18 份 NIST 报告里 17 份有 (a)、ctc_05-e1 只有 (b)。
     rows, cr = _open_table(wb, t, "ta", "tessellated_annotation_occurren", TA_ALIASES,
-                           TA_WANTS, TA_DEFAULT)
-    if rows is None:
-        t.warnings.append("tessellated_annotation_occurrence 表缺失（图形 PMI 通道不可用）")
-    else:
+                           TA_WANTS, TA_DEFAULT, optional=True)
+    if rows is not None:
         c_id, c_nm = col(cr, "id"), col(cr, "name")
         c_ref, c_uni = col(cr, "associated semantic pmi"), col(cr, "equivalent unicode string")
         t.ta_cols = cr.n_cols if cr else 0
@@ -908,11 +956,53 @@ def load_sfa(path: str) -> SfaTruth:
                 }
         if cr:
             cr.n_loaded = len(t.ta)
+        t.link_channel = LINK_TA
         if t.ta and not any(v.get("text") for v in t.ta.values()):
             t.warnings.append(
                 "tessellated_annotation_occurrence 未提供 `Equivalent Unicode String(s)`"
                 "（图形文本通道），「SFA图形文本」列将为空，内容比对已回落到语义表文本。"
                 "如需按图纸上实际呈现的字形比对，请在 SFA 导出时勾选该列。")
+    else:
+        rows, cr = _open_table(wb, t, "ta", "draughting_model_item_associati",
+                               DMIA_ALIASES, DMIA_WANTS, DMIA_DEFAULT, optional=True)
+        if rows is None:
+            t.warnings.append(
+                "两种图形标注关联表都没有："
+                "`tessellated_annotation_occurrence` 与 `draughting_model_item_association`，"
+                "标注 ↔ 语义实体无法建立关联（比对结果必然全为多余 / 缺失）")
+        else:
+            c_def, c_item = col(cr, "definition"), col(cr, "identified_item")
+            t.ta_cols = cr.n_cols if cr else 0
+            agg: Dict[int, Dict[str, List[str]]] = {}
+            for r in rows:
+                items_ref = _ref_ids(_cell(r, c_item))
+                if not items_ref:
+                    continue
+                rec = agg.setdefault(items_ref[0], {"refs": [], "raw": []})
+                raw = _cell(r, c_def)
+                for x in _ref_ids(raw):
+                    if x not in rec["refs"]:
+                        rec["refs"].append(x)
+                if raw and raw not in rec["raw"]:
+                    rec["raw"].append(raw)
+            for hid, rec in agg.items():
+                nm = t.dc.get(hid)
+                if not nm:
+                    continue                      # callout 未被 dc 表登记，跳过
+                t.ta[nm] = {
+                    "id": hid, "ta_name": nm,
+                    "sem_refs": rec["refs"], "sem_ref_raw": " ; ".join(rec["raw"]),
+                    "text": "",                   # 该形态不带图形文本列
+                }
+            if cr:
+                cr.n_loaded = len(t.ta)
+                cr.n_rows_grouped = len(agg)      # 装载校验的分母：分组合数，不是行数
+            t.link_channel = LINK_DMIA
+            t.warnings.append(
+                "该报告没有 `tessellated_annotation_occurrence`，已改用 "
+                "`draughting_model_item_association` 建立关联（等价通道，非错误）。"
+                "代价：缺 `Equivalent Unicode String(s)` 图形文本列，"
+                "内容比对回落到语义表文本，「SFA图形文本」列为空。")
 
     # --- 4. datum：基准标识
     rows, cr = _open_table(wb, t, "datum", "datum", DATUM_ALIASES,
@@ -997,16 +1087,30 @@ def _integrity_checks(t: SfaTruth) -> None:
             add(f"{cr.sheet} 列名识别", False, "退回默认列号，结构变化时会静默失配")
 
     for cr in t.recipes:
-        if cr.n_rows == 0:
+        # 聚合表（DMIA）的「应有条数」是分组合数，不是表内行数
+        n_rows = cr.n_rows_grouped or cr.n_rows
+        if n_rows == 0:
             add(f"{cr.sheet} 装载", False, "表内无可识别的数据行")
         elif cr.n_loaded == 0:
-            add(f"{cr.sheet} 装载", False, f"表内 {cr.n_rows} 行、装载 0 条",
+            add(f"{cr.sheet} 装载", False, f"表内 {n_rows} 行、装载 0 条",
                 "整表被跳过：列定位与代码预期不符")
-        elif cr.n_loaded < cr.n_rows * 0.5:
+        elif cr.n_loaded < n_rows * 0.5:
             add(f"{cr.sheet} 装载", False,
-                f"表内 {cr.n_rows} 行、仅装载 {cr.n_loaded} 条", "疑似列定位错位")
+                f"表内 {n_rows} 行、仅装载 {cr.n_loaded} 条", "疑似列定位错位")
         else:
-            add(f"{cr.sheet} 装载", True, f"{cr.n_loaded}/{cr.n_rows} 条")
+            extra = f"，聚合为 {cr.n_loaded} 组" if cr.n_rows_grouped else ""
+            add(f"{cr.sheet} 装载", True,
+                f"{cr.n_loaded}/{n_rows} 条{extra}")
+
+    # 关联通道本身要先确认存在 —— 两种表都缺时，下面所有关联统计都是空的
+    # 「假绿」，必须显式报出来。这是 ctc_05-e1 暴露的：报告只有
+    # draughting_model_item_association，而代码只认 tessellated 表，
+    # 于是 t.ta 全空、指标 0%，但其余校验项全部通过。
+    add("图形标注关联通道", bool(t.link_channel),
+        t.link_channel or "两种关联表都缺失",
+        "`tessellated_annotation_occurrence` 与 `draughting_model_item_association` "
+        "都没找到，标注 ↔ 语义实体无法建立关联"
+        if not t.link_channel else "")
 
     if t.ta:
         # 引用分五类可落地：直接落语义表 / 经 dcr 映射（尺寸）/ datum_feature（基准）/
@@ -1639,6 +1743,13 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
                     seg = normalize(t.semantic[sid]["text"])
                     sub.sfa_entity, sub.sfa_text = ent, seg
                     ident = datum_target_ident(seg, expect)
+                    # 该目标所定义的基准字母也要标记为已用：C、D 这类基准在 SFA 里
+                    # **没有 datum_feature**（图纸上由目标区域定义，dev 只能提成
+                    # datum target），不标记会让反向检查多报两条
+                    # 「SFA datum 表有、开发侧未提取」，把基准覆盖率压到 67%。
+                    for did, d in t.datum.items():
+                        if dev_ident and d.get("identification") == dev_ident:
+                            used_sem[("datum", did)] = key
                     if expect and ident and ident == expect:
                         sub.status, sub.remark = ST_HIT, "ID 关联 + 基准目标标识一致"
                     else:
