@@ -28,6 +28,16 @@ CASES = [
         "defects": 6,
         "defect_codes": {"SYM 符号丢失": 4, "CNT 数量前缀不符": 2},
     },
+    {
+        # CTC 系列：实体 ID 只有 2~3 位（FTC 是 4~7 位），且 datum 与 datum_feature
+        # 的 ID 不相邻（差 3 而非 1）。这两个差异曾让比对直接 0% 命中，
+        # 用例放在这里是为了锁死「不写死 ID 位数、不用 ID 算术推基准」这两条规则。
+        "md": "samples/dev_ctc_01.md",
+        "xlsx": "nist_ctc_01_asme1_ap242-e1-sfa.xlsx",
+        "recall": 100.0, "precision": 100.0, "datum": 100.0,
+        "defects": 0,
+        "defect_codes": {},
+    },
 ]
 
 FAIL = []

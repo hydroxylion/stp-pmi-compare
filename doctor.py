@@ -34,6 +34,7 @@ def known_symbols():
     含五类：形位公差符号（_FCF_CHARS）、符号别名、字形归一化表（SYMBOL_MAP，
     含 `±`/`×` 这类通用字符）、残缺乱码定点表、SFA 排版字形。
     后四类都不是需要新增的公差符号，报出来只会产生噪音。
+    角度单位（`°′″`）同理：它是单位不是公差符号，不归 _FCF_CHARS 管。
     """
     out = set()
     for name in ("_FCF_CHARS", "SFA_LAYOUT_GLYPHS"):
@@ -41,6 +42,7 @@ def known_symbols():
     for name in ("_SYM_ALIAS", "SYMBOL_MAP", "_MOJIBAKE_FIXED", "_CP936_PATCH"):
         out |= set((getattr(core, name, {}) or {}).keys())
     out |= set("⌀ⓂⓁⓅⓊⓈ")
+    out |= set("°′″")
     return out
 
 

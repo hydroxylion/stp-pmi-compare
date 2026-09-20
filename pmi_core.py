@@ -656,7 +656,14 @@ TA_WANTS, TA_DEFAULT = ("id", "name", "associated semantic pmi",
                         "equivalent unicode string"), (0, 1, 10, 13)
 DATUM_ALIASES, DATUM_WANTS, DATUM_DEFAULT = (
     ("id", "identification"), ("id", "identification"), (0, 5))
+# datum_feature 表：ID -> 基准字母（列名就叫 `Datum`）。这是 ta 里 `Simple Datum.n`
+# 引用落地的唯一通道 —— datum 表的 ID 与它不同源。
+DF_ALIASES, DF_WANTS, DF_DEFAULT = (("id", "datum"), ("id", "datum"), (0, 5))
 DCR_ALIASES, DCR_WANTS, DCR_DEFAULT = (("id", "dimension"), ("id", "dimension"), (0, 1))
+# 无语义文本的实体表（尺寸 / 位置 / 尺寸表示）：只用来登记「这个 ID 真实存在」，
+# ta 引用了它们算合法，只是没有语义条目可比 —— 不该被当成「引用无法解释」。
+ENTITY_ONLY_TABLES = ("dimensional_size", "dimensional_location",
+                      "shape_dimension_representation")
 
 
 @dataclass
@@ -669,6 +676,11 @@ class SfaTruth:
     ta: Dict[str, Dict[str, Any]] = field(default_factory=dict)         # name -> {id, sem_refs, text}
     ta_cols: int = 0                                                    # ta 表实际列数（图形文本通道判定）
     dcr_by_dim: Dict[int, int] = field(default_factory=dict)            # dimensional_*.ID -> dcr.ID
+    # datum_feature.ID -> 基准字母。"datum.ID" 与 "datum_feature.ID" 是两套 ID，
+    # 两者**不保证相邻**（FTC 系列恰好差 1，CTC 系列实测差 3），所以必须按 ID 精确映射，
+    # 不能再用 `datum.ID = ref - 1` 的算术假设。
+    datum_feature: Dict[int, str] = field(default_factory=dict)
+    known_entities: set = field(default_factory=set)                    # 无语义文本的实体 ID（尺寸/位置），用于引用合法性判定
     sheets: List[str] = field(default_factory=list)
     sentinel_row: Optional[int] = None
     warnings: List[str] = field(default_factory=list)
@@ -685,7 +697,14 @@ class SfaTruth:
         return [c for c in self.checks if not c.ok]
 
 
-_REF_ID = re.compile(r"(?<![\d.])(\d{4,7})(?![\d.])")
+# 引用列（ta 的 `Associated Semantic PMI`、dcr 的 `dimension`）的值形如
+# `dimensional_size 120`，要从里面抠出实体 ID。这里**不能写死 ID 位数**：
+# NIST FTC 系列实体 ID 是 4~7 位，而 CTC 系列（如 ctc_01）只有 2~3 位，
+# 早期写死 `\d{4,7}` 会让整张 dcr 表装载为 0 条、ta 引用全部丢失 ——
+# 直接表现为全量失配（0% 命中），且不报任何错。
+# 排除 `(` 是为了跳过 `(1) composite_shape_aspect` 这类「第 n 个引用」序号，
+# 排除前后的 `.` 是为了不把 `35.0` / `34.8` 这类小数当成 ID。
+_REF_ID = re.compile(r"(?<![\d.(])(\d{1,7})(?![\d.])")
 
 
 def _ref_ids(text: str) -> List[int]:
@@ -727,17 +746,20 @@ def _cell(r: List[str], j: Optional[int]) -> str:
 
 def _open_table(wb, t: SfaTruth, key: str, prefix: str, aliases: Sequence[str],
                 wants: Sequence[str], defaults: Sequence[int],
-                search: Sequence[str] = ()) -> Tuple[Optional[List[List[str]]], Optional[ColRecipe]]:
+                search: Sequence[str] = (),
+                optional: bool = False) -> Tuple[Optional[List[List[str]]], Optional[ColRecipe]]:
     """定位工作表并解析表头列名，返回 (数据行, 列定位结果)。
 
     `search` 是备用表名前缀（SFA 不同版本里同一张表可能叫不同名字）。
+    `optional=True` 表示该表缺失属正常（如只有部分报告才导出的辅助索引表），不记警告。
     """
     sname = _pick_exact(t.sheets, prefix) or _pick_sheet(t.sheets, prefix)
     for alt in search:
         if not sname:
             sname = _pick_sheet(t.sheets, alt)
     if not sname:
-        t.warnings.append(f"未找到 `{prefix}` 表")
+        if not optional:
+            t.warnings.append(f"未找到 `{prefix}` 表")
         return None, None
     rows = _rows(wb[sname])
     cr = _locate(rows, aliases, wants, defaults)
@@ -837,6 +859,19 @@ def load_sfa(path: str) -> SfaTruth:
                     t.datum[int(rid)] = {"id": int(rid), "identification": _cell(r, c_ident)}
             cr.n_loaded = len(t.datum)
 
+    # --- 4b. datum_feature：基准字母。ta 里 `Simple Datum.n` 引用的是本表 ID，
+    # 而 datum 表的 ID 是另一套（两者不相邻），所以这一跳不能靠算术猜。
+    rows, cr = _open_table(wb, t, "datum_feature", "datum_feature", DF_ALIASES,
+                           DF_WANTS, DF_DEFAULT, optional=True)
+    if rows is not None:
+        c_id, c_ident = col(cr, "id"), col(cr, "datum")
+        for r in rows:
+            rid = _cell(r, c_id)
+            if rid.isdigit():
+                t.datum_feature[int(rid)] = _cell(r, c_ident)
+        if cr:
+            cr.n_loaded = len(t.datum_feature)
+
     # --- 5. dimensional_characteristic_representation：尺寸的第 2 跳
     rows, cr = _open_table(wb, t, "dcr", "dimensional_characteristic_repr", DCR_ALIASES,
                            DCR_WANTS, DCR_DEFAULT)
@@ -849,6 +884,18 @@ def load_sfa(path: str) -> SfaTruth:
                     t.dcr_by_dim[ref] = int(rid)
         if cr:
             cr.n_loaded = len(t.dcr_by_dim)
+
+    # --- 5b. 登记「只有实体、没有语义文本」的 ID（尺寸 / 位置 / 尺寸表示）。
+    # 这些表不进 recipes（不做装载校验，它们本来就不参与比对），只把 ID 收进白名单，
+    # 供「ta 引用能否落地」判定使用。
+    for prefix in ENTITY_ONLY_TABLES:
+        sname = _pick_exact(t.sheets, prefix) or _pick_sheet(t.sheets, prefix)
+        if not sname:
+            continue
+        for r in _rows(wb[sname]):
+            rid = _cell(r, 0)
+            if rid.isdigit():
+                t.known_entities.add(int(rid))
 
     # --- 6. 单位
     hname = _pick_sheet(t.sheets, "Header")
@@ -892,15 +939,17 @@ def _integrity_checks(t: SfaTruth) -> None:
             add(f"{cr.sheet} 装载", True, f"{cr.n_loaded}/{cr.n_rows} 条")
 
     if t.ta:
-        # 引用分三类可落地：直接落语义表 / 经 dcr 映射（尺寸）/ 经 datum-2hop（基准）。
-        # 只看「三类都解释不了」的比例 —— 拿「能落进语义表」当分子会把正常的
+        # 引用分五类可落地：直接落语义表 / 经 dcr 映射（尺寸）/ datum_feature（基准）/
+        # datum 的 ID-1 邻接（旧版报告）/ 无语义文本的实体表（尺寸·位置）。
+        # 只看「全部解释不了」的比例 —— 拿「能落进语义表」当分子会把正常的
         # 尺寸类引用算成异常（实测仅 54%），阈值形同虚设。
         total = 0
         explained = 0
         for v in t.ta.values():
             for r in v["sem_refs"]:
                 total += 1
-                if r in t.semantic or r in t.dcr_by_dim or (r - 1) in t.datum:
+                if (r in t.semantic or r in t.dcr_by_dim or r in t.datum_feature
+                        or r in t.known_entities or (r - 1) in t.datum):
                     explained += 1
         ratio = explained / total if total else 1.0
         add("ta 引用可解释", ratio >= TA_REF_MIN_HIT,
@@ -938,7 +987,9 @@ class DevItem:
         ts = self.types
         if any("geometric_tolerance" in x or x.endswith("_tolerance") for x in ts):
             return KIND_GT
-        if any(x in ("dimensional_size", "dimensional_location", "dimensional_characteristic_representation") for x in ts):
+        if any(x in ("dimensional_size", "dimensional_location",
+                     "angular_location", "angular_size",
+                     "dimensional_characteristic_representation") for x in ts):
             return KIND_DIM
         if any("datum_feature" in x or x == "datum" for x in ts) and "size" not in "".join(ts):
             if self.detail.get("datum"):
@@ -1209,24 +1260,30 @@ class MatchRow:
 
 
 def _lookup_semantic_for_dev(it: DevItem, t: SfaTruth) -> Tuple[List[int], str]:
-    """返回 (语义表 ID 列表, 关联路径)。"""
+    """返回 (命中的 ID 列表, 关联路径)。
+
+    路径语义：
+      `gt-1hop`            ta 直接引用语义表 ID
+      `dim-2hop`           ta -> dimensional_*.ID -> dcr -> 语义表（尺寸值挂在 dcr 上）
+      `datum_feature-1hop` ta -> datum_feature.ID -> 基准字母
+      `datum-2hop`         ta -> ID-1 -> datum 表（旧报告里两者恰好相邻时的兜底）
+      `none`               没接上任何语义实体
+    """
     ta = t.ta.get(it.name)
     if not ta:
         return [], "none"
     refs = list(ta["sem_refs"])
-    raw = ta["sem_ref_raw"]
 
     if it.kind == KIND_GT:
         ids = [r for r in refs if r in t.semantic]
         return ids, "gt-1hop" if ids else "none"
 
     if it.kind == KIND_DIM:
-        # col11 指向 dimensional_size / dimensional_location，需经 dcr 映射
-        ids = []
-        for r in refs:
-            dcr = t.dcr_by_dim.get(r) or t.dcr_by_dim.get(r + 1)
-            if dcr and dcr in t.semantic:
-                ids.append(dcr)
+        # ta 引用的是 dimensional_size / dimensional_location / angular_location 的 ID，
+        # 尺寸值挂在 dcr 上，须经 dcr 精确映射。
+        # **不做 `r+1` 兜底**：ctc_01 里 dimensional_size 127 没有 dcr 条目，
+        # 一旦按 r+1 试探就会命中 128 的 dcr，把 Linear Size.6 错配成 Linear Size.9 的内容。
+        ids = [i for i in (t.dcr_by_dim.get(r) for r in refs) if i and i in t.semantic]
         if ids:
             return ids, "dim-2hop"
         ids = [r for r in refs if r in t.semantic]
@@ -1234,10 +1291,15 @@ def _lookup_semantic_for_dev(it: DevItem, t: SfaTruth) -> Tuple[List[int], str]:
 
     if it.kind == KIND_DATUM:
         # 基准目标（datum_target）：col11 直接给出 datum_target 实体 ID，1 跳
-        # 普通基准：col11 里 datum_feature / shape_aspect 的 ID，datum.ID = 该 ID - 1，2 跳
         for r in refs:
             if t.semantic.get(r, {}).get("entity") == "datum_target":
                 return [r], "datum_target-1hop"
+        # 普通基准：col11 是 datum_feature 的 ID，按 ID 精确查。
+        # datum 表与 datum_feature 表是**两套 ID**，不保证相邻（FTC 差 1、CTC 差 3），
+        # 所以 `ID-1` 只是最后兜底，不能当主路径。
+        for r in refs:
+            if r in t.datum_feature:
+                return [r], "datum_feature-1hop"
         for r in refs:
             if (r - 1) in t.datum:
                 return [r - 1], "datum-2hop"
@@ -1418,6 +1480,20 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
             row.remark = f"handle/name 与 SFA 不一致（SFA={t.dc[it.handle]}）"
 
         if not sem_ids:
+            # 「接不上」要分两种，判错方向会同时污染召回率与精确率：
+            #   a) ta 的引用落在**无语义文本的实体表**（dimensional_size /
+            #      dimensional_location）上 —— 标注确实存在，只是 SFA 没为它导出语义值
+            #      （图纸上是个没赋值的尺寸）。双侧都无可比内容，归注释层，不进语义分母。
+            #   b) 引用接不上任何已知实体 —— 开发侧多提取，才是真「多余」。
+            refs = (t.ta.get(it.name) or {}).get("sem_refs") or []
+            if it.kind == KIND_DIM and refs and all(r in t.known_entities for r in refs):
+                row.layer = LAYER_NOTE
+                row.status = ST_NOTE
+                row.path = "entity-no-semantic"
+                row.remark = ("SFA 有该尺寸实体但未导出语义值（图纸上未赋值的尺寸）；"
+                              "双侧无可比内容")
+                rows.append(row)
+                continue
             if it.kind == KIND_DATUM:
                 row.status = ST_EXTRA
                 row.remark = (row.remark + " ；" if row.remark else "") + "SFA datum 表未匹配到对应基准"
@@ -1436,7 +1512,20 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
             if it.kind == KIND_DATUM:
                 ent = t.semantic.get(sid, {}).get("entity", "")
                 dev_ident = str(it.detail.get("datum", "") or "")
-                if ent == "datum_target":
+                if path == "datum_feature-1hop":
+                    # 基准字母来自 datum_feature 表。顺手把 datum 表里的同名字母标记为已用，
+                    # 否则反向检查会再报一条「SFA datum 表有、开发侧未提取」的重复行。
+                    ident = str(t.datum_feature.get(sid, "") or "")
+                    sub.sfa_entity, sub.sfa_text = "datum_feature", ident
+                    for did, d in t.datum.items():
+                        if d.get("identification") == ident:
+                            used_sem[("datum", did)] = key
+                    if ident and ident == dev_ident:
+                        sub.status, sub.remark = ST_HIT, "ID 关联 + 基准标识一致"
+                    else:
+                        sub.status = ST_SUSPECT
+                        sub.remark = f"基准标识差异：开发={dev_ident or '-'} SFA={ident or '-'}"
+                elif ent == "datum_target":
                     # 语义表文本形如 `K1 (area)`，基准目标标识 = 基准字母 + 目标序号
                     tid = str(it.detail.get("target id", "") or "")
                     expect = f"{dev_ident}{tid}"

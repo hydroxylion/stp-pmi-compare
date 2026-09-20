@@ -728,6 +728,155 @@ check("断链候选 正常数据下不产生噪音",
 
 
 # ============================================================
+# CTC 系列特征：短 ID + datum_feature 独立通道（NIST ctc_01 踩出的三个坑）
+#   a) 实体 ID 只有 2~3 位（FTC 是 4~7 位），引用正则写死位数会让 dcr 整表装载 0 条
+#   b) datum 与 datum_feature 是两套 ID，不保证相邻，不能靠 `ID-1` 推
+#   c) 尺寸的 dcr 映射不能做 `ID+1` 兜底，否则会串到相邻尺寸
+# ============================================================
+def _build_sfa_ctc_like(tmpdir: str) -> str:
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    ws = wb.create_sheet("Header")
+    for i in range(3):
+        ws.append([f"Header row {i}", None])
+
+    ws = wb.create_sheet("Semantic PMI Summary")
+    ws.append(["Semantic PMI Summary (2)", None, None, None])
+    ws.append(["ID", "Entity", "Semantic PMI", "Similar PMI"])
+    for rid, ent, txt in [
+        (51, "datum_system", "A"),
+        (113, "dimensional_characteristic_representation", "⌀25 ± 0.15"),
+        (118, "dimensional_characteristic_representation", "60° ± 0.5°"),
+    ]:
+        ws.append([str(rid), ent, txt, None])
+
+    ws = wb.create_sheet("draughting_callout")
+    ws.append(["draughting_callout  (4)", None])
+    ws.append(["ID", "name"])
+    for rid, nm in [(607, "Linear Size.1"), (616, "Linear Size.5"),
+                    (618, "Angular Size.1"), (615, "Simple Datum.1")]:
+        ws.append([str(rid), nm])
+
+    ws = wb.create_sheet("tessellated_annotation_occurren")
+    ws.append(["tessellated_annotation_occurrence (4)"] + [None] * 11)
+    ws.append(["ID", "name", "styles", "item", "name", "children",
+               "presentation style", "color", "plane", "Associated Geometry",
+               "Associated Semantic PMI", "Saved Views"])
+    for rid, nm, ref in [(600, "Linear Size.1", "dimensional_size 120"),
+                         (601, "Linear Size.5", "dimensional_size 121"),
+                         (602, "Angular Size.1", "angular_location 33"),
+                         (603, "Simple Datum.1", "datum_feature 34")]:
+        ws.append([str(rid), nm] + [""] * 8 + [ref, ""])
+
+    # datum_feature 34 -> A，而 datum 是 37 -> A：差 3，不是 1
+    ws = wb.create_sheet("datum_feature")
+    ws.append(["datum_feature  (1)"] + [None] * 5)
+    ws.append(["ID", "name", "description", "of_shape", "product_definitional", "Datum"])
+    ws.append(["34", "Simple Datum.1", "", "", "True", "A"])
+
+    ws = wb.create_sheet("datum")
+    ws.append(["datum  (1)"] + [None] * 5)
+    ws.append(["ID", "name", "description", "of_shape", "product_definitional", "identification"])
+    ws.append(["37", "", "", "", "False", "A"])
+
+    # dcr：121 -> 113（Linear Size.5）、33 -> 118（Angular Size.1）；**120 故意没有**
+    ws = wb.create_sheet("dimensional_characteristic_repr")
+    ws.append(["dimensional_characteristic_representation (2)"] + [None] * 3)
+    ws.append(["ID", "dimension", "representation", "Dimensional Tolerance"])
+    ws.append(["113", "dimensional_size 121", "", "⌀25 ± 0.15"])
+    ws.append(["118", "angular_location 33", "", "60° ± 0.5°"])
+
+    # 无语义文本的实体表：120 / 121 存在，只是没有 dcr
+    ws = wb.create_sheet("dimensional_size")
+    ws.append(["dimensional_size  (2)"])
+    ws.append(["ID", "applies_to", "name"])
+    ws.append(["120", "composite_shape_aspect 219", "diameter"])
+    ws.append(["121", "composite_shape_aspect 220", "diameter"])
+
+    path = os.path.join(tmpdir, "ctc_like_sfa.xlsx")
+    wb.save(path)
+    return path
+
+
+_MD_CTC = """# PMI 提取结果
+
+## MBD_0
+
+- 标注数量：4 条
+
+### 1. Ø35 0 / -0.2
+
+detailData:
+{
+  "handle": "607",
+  "name": "Linear Size.1",
+  "size type": "diameter",
+  "type": "dimensional_size"
+}
+
+### 2. Ø25 ±.15
+
+detailData:
+{
+  "handle": "616",
+  "name": "Linear Size.5",
+  "size type": "diameter",
+  "type": "dimensional_size"
+}
+
+### 3. 60 ±.5
+
+detailData:
+{
+  "handle": "618",
+  "length type": "angle",
+  "name": "Angular Size.1",
+  "type": "angular_location"
+}
+
+### 4. A
+
+detailData:
+{
+  "handle": "615",
+  "datum": "A",
+  "name": "Simple Datum.1",
+  "type": "datum_feature"
+}
+"""
+
+with tempfile.TemporaryDirectory() as _td_ctc:
+    _ctc = C.load_sfa(_build_sfa_ctc_like(_td_ctc))
+_ctc_items, _ = C.parse_dev_markdown_ex(_MD_CTC)
+_ctc_rows = C.match_items(_ctc, _ctc_items)
+_ctc_m = C.compute_metrics(_ctc_rows)
+_ctc_paths = C.link_stats(_ctc_rows)
+
+check("短 ID 引用可提取（3 位数不丢）", _ctc.ta["Linear Size.1"]["sem_refs"], [120])
+check("短 ID dcr 表不再整表跳过", _ctc.recipe("dcr").n_loaded, 2)
+check("短 ID 交叉校验全通过", [b.line() for b in _ctc.broken_checks()], [])
+
+check("datum_feature 通道优先于 ID 邻接",
+      C._lookup_semantic_for_dev(_ctc_items[3], _ctc)[1], "datum_feature-1hop")
+check("datum_feature 基准字母取对", _ctc.datum_feature.get(34), "A")
+check("基准覆盖率 100", _ctc_m.datum_coverage, 100.0)
+
+check("尺寸不借 ID+1 兜底（120 无 dcr 即判无关联）",
+      C._lookup_semantic_for_dev(_ctc_items[0], _ctc), ([], "none"))
+check("无语义值的尺寸归注释层", _ctc_m.note_exclusive >= 1, True)
+# 语义分母只算「两边都有内容可比」的条目：#2 尺寸 + #3 角度；#4 基准单列一层
+check("无语义值的尺寸不计入语义分母", _ctc_m.sem_expected, 2)
+
+check("angular_location 归尺寸类", _ctc_items[2].kind, C.KIND_DIM)
+check("angular_location 走 dcr 2 跳",
+      C._lookup_semantic_for_dev(_ctc_items[2], _ctc), ([118], "dim-2hop"))
+check("短 ID 场景三率 100", (_ctc_m.recall, _ctc_m.precision), (100.0, 100.0))
+check("短 ID 场景无断链", _ctc_paths.get("none", 0), 0)
+
+
+# ============================================================
 # 汇总
 # ============================================================
 for f in FAIL:

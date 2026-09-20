@@ -19,13 +19,13 @@ md.handle  ==  SFA.draughting_callout.ID
 md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurrence.name
 ```
 
-语义映射四条路径（均已在 `nist_ftc_07` / `nist_ftc_10` NIST 测试件上实测打通）：
+语义映射四条路径（均已在 `nist_ftc_07` / `nist_ftc_10` / `nist_ctc_01` NIST 测试件上实测打通）：
 
 | 类别 | 路径 | 跳数 |
 |---|---|---|
 | GT / FCF | `ta.col11` 末尾 ID → 语义表 ID | 1 |
-| DIM | `ta.col11` 的 dimensional_size / _location ID → `dcr.dimension` 匹配 → `dcr.ID` → 语义表 ID | 2 |
-| datum | `ta.col11` 末尾形貌 ID − 1 → `datum.ID` → `datum.identification` | 2 |
+| DIM | `ta.col11` 的 dimensional_size / _location / angular_location ID → `dcr.dimension` 匹配 → `dcr.ID` → 语义表 ID | 2 |
+| datum | `ta.col11` 的 ID → `datum_feature.ID` → `datum_feature.Datum`（基准字母） | 1 |
 | datum_target | `ta.col11` 直接给出 `datum_target` 实体 ID → 语义表 ID | 1 |
 
 > `ta` = `tessellated_annotation_occurrence`。**列位置一律按表头列名定位，不写死列号** ——
@@ -33,6 +33,19 @@ md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurre
 > 关联键用 `Associated Semantic PMI` 列；`Equivalent Unicode String(s)` 是图形文本通道，
 > 属可选列：**缺它不影响关联**，只是「SFA图形文本」列会为空、内容比对回落到语义表文本。
 > 导出时勾上该列可获得最精确的按字形比对。
+
+**ID 不能靠位数或算术猜。** 踩过两次同源坑，现在两条规则都写进了回归测试：
+
+- **不写死 ID 位数。** `Associated Semantic PMI` 列的值形如 `dimensional_size 120`。
+  早期用 `\d{4,7}` 抠 ID —— NIST FTC 系列实体 ID 恰好是 4~7 位，一直正常；
+  换到 CTC 系列（ID 只有 2~3 位）直接抠不出东西，`dcr` 整表装载 0 条、`ta` 引用全空，
+  表现就是**全量失配 0%，且不报任何错**。现在改为「不猜位数、只排除括号序号与小数」。
+- **不用 `ID ± 1` 推实体。** `datum.ID` 与 `datum_feature.ID`、`dimensional_size.ID` 与
+  `dcr.dimension` 都是各自独立编号，只是**碰巧**在 FTC 系列里相邻。
+  早期基准走 `datum.ID = ref - 1`、尺寸走 `dcr.lookup(ref) or dcr.lookup(ref + 1)`：
+  前者在 ctc_01 上让 3 条基准全部落空，后者把 `Linear Size.6` 错配成相邻尺寸
+  `Linear Size.9` 的内容（一条「疑似」+ 一条「文本差异」）。现在一律精确查表，
+  `ID - 1` 只作为旧报告的兜底路径。
 
 ## 排查「一条都没对上」
 
@@ -62,7 +75,7 @@ md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurre
 |---|---|
 | ① 装载与列定位 | 每张表的列数、表头行、**用到的列是怎么定位的**；来源显示「默认列号（脆弱）」说明该表没识别出表头 |
 | ② 交叉校验 | 表内数据行数 vs 实际装载条数、`ta` 引用能否落地、`dc` 与 `ta` 的 name 是否一一对应 |
-| ③ 关联路径分布 | `gt-1hop / dim-2hop / datum-2hop / datum_target-1hop / none` 各多少条 |
+| ③ 关联路径分布 | `gt-1hop / dim-2hop / datum_feature-1hop / datum-2hop / datum_target-1hop / entity-no-semantic / none` 各多少条（界面显示中文释义） |
 | ④ 疑似对应 | 关联失败条目的模糊匹配候选，**仅供参考，不进任何指标** |
 
 ## 结构变化不会静默失配
@@ -122,7 +135,13 @@ ID 索引规模、交叉校验逐项结果、装载告警、**未收录字符清
 |---|---|---|
 | 语义 PMI 层（主指标） | 几何公差 + 尺寸公差 | 是 |
 | 基准层（单列） | SFA `datum` 表 vs md 基准标注 | 独立统计 |
-| 非语义 / 注释层（单列） | label / note 类 | 否 |
+| 非语义 / 注释层（单列） | label / note 类；**SFA 未导出语义值的尺寸** | 否 |
+
+「SFA 未导出语义值的尺寸」指：`ta` 的引用落在 `dimensional_size` / `dimensional_location`
+这类**只有实体、没有语义值**的表上（图纸上是个未赋值的尺寸 / 位置）。
+双侧都拿不出可比内容，所以归注释层而不是判「多余」—— 否则会凭空压低精确率。
+判据是「引用落在实体表上」，所以**开发侧漏提真值的情况仍会被抓出来**：
+只要 SFA 有语义值（`dcr` 里有映射），条目就会进语义层参与比对。
 
 **缺陷检测层与指标层解耦**：编码损坏等缺陷在归一化阶段会被修复以保证比对可进行，
 但修复动作全程留痕，计入独立的缺陷清单，**不拉低召回率 / 精确率分母**。
@@ -182,7 +201,7 @@ PyCharm 中直接运行 `pmi_compare_work.py` 也可以 —— 脚本内置 bare
 pmi_core.py            比对内核：真值装载 / markdown 解析 / 归一化 / ID 关联 / 指标 / 缺陷检测
 pmi_compare_work.py    Streamlit 界面（当前主入口）
 doctor.py              一键诊断：结果不对劲时跑一次，产出完整上下文报告
-test_pmi_core.py       内核回归（161 项：指标口径、关联链路、缺陷检测、解析自检、列名驱动）
+test_pmi_core.py       内核回归（179 项：指标口径、关联链路、缺陷检测、解析自检、列名驱动、ID 位数与基准通道）
 test_ui_smoke.py       界面冒烟（29 项：AppTest 无头跑渲染分支 + 列口径 + 两个诊断面板）
 test_realdata.py       真实数据回归（锁端到端数值，语料缺失自动跳过）
 samples/               真实语料目录（不进版本控制，见 samples/README.md）
@@ -200,8 +219,16 @@ python test_realdata.py          # 真实数据回归（需 samples/ 与 SFA 报
 python doctor.py <xlsx> [md]     # 出问题时的一键诊断（不是测试，是排查工具）
 ```
 
-> `test_pmi_core.py` 的列名驱动用例是**现场用 openpyxl 构造**的报告（列序全部打乱、
-> 表头带换行与 `(Sec. x)`），不依赖外部数据文件，可离线跑。
+> `test_pmi_core.py` 的列名驱动与 CTC 场景用例是**现场用 openpyxl 构造**的报告
+> （列序全部打乱、表头带换行与 `(Sec. x)`、实体 ID 用 2~3 位数、基准两套 ID 不相邻），
+> 不依赖外部数据文件，可离线跑。
+
+真实数据回归当前锁两个测试件（语料见 `samples/README.md`）：
+
+| 测试件 | 特征 | 期望 |
+|---|---|---|
+| `nist_ftc_10` | 实体 ID 4 位数，`datum` 与 `datum_feature` 恰好相邻 | 三率 100%，缺陷 6 条 |
+| `nist_ctc_01` | 实体 ID 2~3 位数，基准两套 ID 差 3，含未赋值尺寸 | 三率 100%，缺陷 0 条 |
 
 ## 环境
 

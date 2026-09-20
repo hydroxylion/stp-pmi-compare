@@ -487,6 +487,21 @@ COL_WIDTH = {
 DEFECT_LEGEND = ("`ENC` 编码损坏 · `CNT` 数量前缀不符 · `SYM` 符号丢失 · `NUM` 数值缺失 · "
                  "`EMP` 标题为空 · `MAP` handle-name 不一致 · `DUP` handle 重复")
 
+# 关联路径的中文释义。key 与 pmi_core._lookup_semantic_for_dev 的返回值一一对应；
+# 出现字典外的 key 直接原样显示 —— 宁可显示英文，也不要静默吞掉。
+PATH_LABELS = {
+    "gt-1hop": "GT 1 跳（图形 → 语义表）",
+    "dim-2hop": "尺寸 2 跳（图形 → dimensional_* → dcr → 语义表）",
+    "datum_target-1hop": "基准目标 1 跳",
+    "datum_feature-1hop": "基准 1 跳（图形 → datum_feature）",
+    "datum-2hop": "基准 2 跳（ID 邻接，旧报告兜底）",
+    "entity-no-semantic": "尺寸实体存在但无语义值（不进语义分母）",
+    "note": "注释 / 标签类",
+    "datum_system": "基准体系",
+    "reverse": "SFA 有、开发侧无",
+    "none": "断链（未关联到任何实体）",
+}
+
 
 def build_column_config(cols):
     """只为当前显示的列生成配置，避免多余 config 干扰。"""
@@ -688,11 +703,12 @@ if _sfa_stat or _checks:
         if _linkstats:
             st.markdown("**③ 关联路径分布**")
             st.caption(
-                "`none` 表示该条目没能关联到任何 SFA 语义实体。"
-                "开发侧几乎全是 `none` = 关联链断裂，而不是两边数据真的对不上。"
+                "`断链` 表示该条目没能关联到任何 SFA 实体。"
+                "开发侧几乎全是断链 = 关联链断了，而不是两边数据真的对不上。"
             )
             st.dataframe(pd.DataFrame(
-                [{"关联路径": k, "条数": v} for k, v in _linkstats.items()]),
+                [{"关联路径": PATH_LABELS.get(k, k), "条数": v}
+                 for k, v in _linkstats.items()]),
                 hide_index=True, width="stretch")
 
         if _suspected:
@@ -705,10 +721,10 @@ if _sfa_stat or _checks:
 
         if not _problems:
             st.caption(
-                "ID 关联靠三张表打通：`draughting_callout.ID`（＝开发侧 handle）→ "
-                "`tessellated_annotation_occurrence` 的 `Associated Semantic PMI` 列 → 语义表 ID。"
-                "其中 GT 1 跳、DIM 经 `dimensional_characteristic_repr` 2 跳、"
-                "基准 2 跳、基准目标 1 跳。"
+                "ID 关联靠这几张表打通：`draughting_callout.ID`（＝开发侧 handle）→ "
+                "`tessellated_annotation_occurrence` 的 `Associated Semantic PMI` 列 → 语义实体。"
+                "其中 GT 1 跳、尺寸经 `dimensional_characteristic_repr` 2 跳、"
+                "基准经 `datum_feature` 1 跳（旧报告 ID 相邻时走 2 跳兜底）、基准目标 1 跳。"
             )
 
 # ---------------------------- 结果 ----------------------------
