@@ -76,6 +76,45 @@ GRAPHIC_ONLY_CASES = [
     },
 ]
 
+# --------------------------------------------------------------------------
+# 经确认保留的判定口径：**不改逻辑，只把现状钉死**
+#
+# 这两类条目从 ftc_08 单独拎出来锁，是因为它们的输出形态容易被误读成
+# 「比对没对上」，但它们都是既定口径下的**正确**结果。谁要动它们，得先看懂为什么。
+#
+# a) Radial Dimension（handle 1231 / 1234 / 1236）：开发侧 `Ø0.237 +.005 / -0.001`，
+#    SFA `⌀0.238  +0.005 -0.001` —— 这是**同一个数的不同精度呈现**：开发侧
+#    detailData 原始值 `0.237500`、value format qualifier `NR2 1.3`（1 位整数
+#    3 位小数）→ 渲染时截断成 `0.237`；SFA 四舍五入成 `0.238`。
+#    关联链本身是通的（path=dim-2hop、语义 ID 命中 525/526/527），所以不是「对不上」；
+#    是 `_num_equivalent` 按 min(位数) 比较 → 判不等 → 缺陷层记 `NUM 数值缺失`、
+#    匹配层落 `⚠️ 疑似（人工复核）`。
+#    **保持不改**：放宽成「数值近似即等价」会让 `0.15 vs 0.1` 这类真差异被静默吞掉，
+#    损失的是检出能力，换来的只是图上几行黄。宁可人工复核。
+#
+# b) `⏥ .015 L1<#h>L2`（handle 1248）：开发侧 description 里的 `#h` 是**未替换的
+#    占位符**（已确认为开发侧缺陷），`L1` / `L2` 是被并进标题的关联标签；
+#    SFA 侧 `▱ | .015` 自然没有这些文本。当前缺陷层只覆盖
+#    「编码 / 空 / 数量 / 符号 / 数值 / 映射 / 重复」七类，**「多出文本」不在其中**，
+#    所以这条 defects 为空；真正把它兜住的是匹配层 → `⚠️ 疑似（人工复核）`。
+#    **按此现状比对**：不为它新增「多余文本」判据 —— SFA 文本是排版拼装出来的，
+#    这类判据的误报面远大于收益，且 `#h` 该由开发侧修提取，不该由比对工具兜底。
+KNOWN_VERDICTS = [
+    {
+        "md": "samples/dev_ftc_08.md",
+        "xlsx": "nist_ftc_08_asme1_ap242-e2-sfa.xlsx",
+        # handle -> (期望状态, 期望缺陷码集合, 期望关联路径)
+        "lock": {
+            # 舍入口径差异：关联命中，判疑似 + 记数值缺失
+            1231: (core.ST_SUSPECT, {core.DF_NUM}, "dim-2hop"),
+            1234: (core.ST_SUSPECT, {core.DF_NUM}, "dim-2hop"),
+            1236: (core.ST_SUSPECT, {core.DF_NUM}, "dim-2hop"),
+            # `#h` 占位符 + 并进标题的标签：关联命中，判疑似，**不进缺陷层**
+            1248: (core.ST_SUSPECT, set(), "gt-1hop"),
+        },
+    },
+]
+
 FAIL = []
 TOTAL = 0
 
@@ -321,6 +360,41 @@ def main():
               any(gc["suggest"] in w for w in t.warnings), t.warnings)
         print(f"  开发侧 {len(dev)} 条 → 全部「{core.ST_ABSENT}」；"
               f"提示改用 {gc['suggest']}")
+        print()
+
+    # ---- 经确认保留的判定口径：锁住现状，防止被「顺手改好」----
+    for kc in KNOWN_VERDICTS:
+        xlp = os.path.join(SFA_DIR, kc["xlsx"])
+        tag = kc["xlsx"].replace("-sfa.xlsx", "")
+        print(f"=== {tag}（既定口径锁定）===")
+        if not os.path.exists(xlp):
+            print(f"  跳过：SFA 报告不存在 {xlp}（可用 PMI_SFA_DIR 指定目录）")
+            continue
+        ran += 1
+
+        t = core.load_sfa(xlp)
+        raw = open(os.path.join(HERE, kc["md"].replace("/", os.sep)),
+                   encoding="utf-8", errors="replace").read()
+        items, _ = core.parse_dev_markdown_ex(raw)
+        rows = core.match_items(t, items)
+
+        for h, (want_status, want_codes, want_path) in sorted(kc["lock"].items()):
+            hit = [r for r in rows if r.handle == h]
+            if not hit:
+                check(f"{tag} handle {h} 存在", False, "结果表里没有这个 handle")
+                continue
+            got_status = sorted({r.status for r in hit})
+            got_codes = {c for r in hit for c in r.defects}
+            got_path = sorted({r.path for r in hit})
+            check(f"{tag} handle {h} 状态 = {want_status}", got_status == [want_status],
+                  got_status)
+            check(f"{tag} handle {h} 缺陷码 = {sorted(want_codes) or '（无）'}",
+                  got_codes == want_codes, sorted(got_codes) or "（无）")
+            check(f"{tag} handle {h} 关联路径 = {want_path}", got_path == [want_path],
+                  got_path)
+        locked = len(kc["lock"])
+        print(f"  锁定 {locked} 个 handle：舍入口径差异 3 条判「疑似」+ 记数值缺失，"
+              f"`#h` 占位符 1 条判「疑似」但不进缺陷层")
         print()
 
     print()
