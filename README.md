@@ -19,14 +19,14 @@ md.handle  ==  SFA.draughting_callout.ID
 md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurrence.name
 ```
 
-语义映射四条路径（均已在 `nist_ftc_07` / `nist_ftc_10` / `nist_ctc_01` NIST 测试件上实测打通）：
+语义映射四条路径（均已在 `nist_ftc_07` / `nist_ftc_10` / `nist_ctc_01` / `nist_ctc_02` NIST 测试件上实测打通）：
 
 | 类别 | 路径 | 跳数 |
 |---|---|---|
 | GT / FCF | `ta.col11` 末尾 ID → 语义表 ID | 1 |
 | DIM | `ta.col11` 的 dimensional_size / _location / angular_location ID → `dcr.dimension` 匹配 → `dcr.ID` → 语义表 ID | 2 |
 | datum | `ta.col11` 的 ID → `datum_feature.ID` → `datum_feature.Datum`（基准字母） | 1 |
-| datum_target | `ta.col11` 直接给出 `datum_target` 实体 ID → 语义表 ID | 1 |
+| datum_target | `ta.col11` 直接给出基准目标实体 ID → 语义表 ID | 1 |
 
 > `ta` = `tessellated_annotation_occurrence`。**列位置一律按表头列名定位，不写死列号** ——
 > SFA 的列数与列序会随版本和导出勾选变化（实测 `ta` 表 12~14 列、`dcr` 表 17~20 列）。
@@ -46,6 +46,25 @@ md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurre
   前者在 ctc_01 上让 3 条基准全部落空，后者把 `Linear Size.6` 错配成相邻尺寸
   `Linear Size.9` 的内容（一条「疑似」+ 一条「文本差异」）。现在一律精确查表，
   `ID - 1` 只作为旧报告的兜底路径。
+- **实体名不做单值匹配。** 同一个实体在不同报告里写法不同：基准目标在 `ftc_10` 里
+  叫 `datum_target`，在 `ctc_02 / ctc_05 / ftc_06` 里叫 `placed_datum_target_feature`。
+  只认一种写法时，`ta` 引用完全能落到语义表（装载与引用校验全绿、体检看不出异样），
+  但判据不认实体名 → 开发侧全判「多余」、SFA 侧全判「缺失」。
+  现在按「含 `datum` 且含 `target`」的宽松判据识别，并在体检面板加了一项
+  **语义表实体归类**：出现未识别的实体名会直接告警。
+
+**基准目标的标识两侧常有干扰，不能按位置取首片段** —— 实测四种写法：
+
+| SFA 文本 | 首片段 | 真实标识 |
+|---|---|---|
+| `A1 (point)` | A1 | A1 |
+| `K1 (area)` | K1 | K1 |
+| `⌀85` + `K1` | ⌀85 | K1 |
+| `1.25x2` + `C1` | 1.25x2 | C1 |
+
+`(point)` / `(line)` / `(area)` / `(circular curve)` 是基准目标的**形式**，
+`⌀85` / `1.25x2` 是目标尺寸，都不是标识。现在优先按「开发侧基准字母 + 目标序号」
+拼出的期望值精确查找，比按位置取首片段稳。
 
 ## 排查「一条都没对上」
 
@@ -98,7 +117,7 @@ cd /d "C:\Users\hui_ou\Desktop\STP比对工具"
 | 段 | 内容 |
 |---|---|
 | ① 装载与列定位 | 每张表的列数、表头行、**用到的列是怎么定位的**；来源显示「默认列号（脆弱）」说明该表没识别出表头 |
-| ② 交叉校验 | 表内数据行数 vs 实际装载条数、`ta` 引用能否落地、`dc` 与 `ta` 的 name 是否一一对应 |
+| ② 交叉校验 | 表内数据行数 vs 实际装载条数、`ta` 引用能否落地、`dc` 与 `ta` 的 name 是否一一对应、**语义表实体名是否全部可归类** |
 | ③ 关联路径分布 | `gt-1hop / dim-2hop / datum_feature-1hop / datum-2hop / datum_target-1hop / entity-no-semantic / none` 各多少条（界面显示中文释义） |
 | ④ 疑似对应 | 关联失败条目的模糊匹配候选，**仅供参考，不进任何指标** |
 | ⑤ 多视图复用 | 同一标注挂在多个保存视图下（开发侧会导出多条），**非缺陷、不影响指标**，单列以免与 `DUP` 混淆 |
@@ -116,6 +135,8 @@ cd /d "C:\Users\hui_ou\Desktop\STP比对工具"
 - 表内数据行数 vs 装载条数（整表被跳过时直接报出，比结果表全红更早）
 - `ta` 引用中「既不在语义表、也不在 dcr / datum 索引」的比例
 - `dc` 的 name 与 `ta` 的 name 对应率
+- 语义表里出现的实体名能否全部归入已知类别（新写法会直接点名，
+  避免像 `placed_datum_target_feature` 那样「引用能落地、判据不认」的隐性断链）
 
 **③ 一键诊断包** — 结果不对劲时跑一次，把完整上下文写成一份文件：
 
@@ -243,9 +264,9 @@ PyCharm 中直接运行 `pmi_compare_work.py` 也可以 —— 脚本内置 bare
 pmi_core.py            比对内核：真值装载 / markdown 解析 / 归一化 / ID 关联 / 指标 / 缺陷检测
 pmi_compare_work.py    Streamlit 界面（当前主入口）
 doctor.py              一键诊断：结果不对劲时跑一次，产出完整上下文报告
-test_pmi_core.py       内核回归（195 项：指标口径、关联链路、缺陷检测、解析自检、列名驱动、ID 位数与基准通道、多视图复用）
+test_pmi_core.py       内核回归（216 项：指标口径、关联链路、缺陷检测、解析自检、列名驱动、ID 位数与基准通道、多视图复用、实体名漂移）
 test_ui_smoke.py       界面冒烟（29 项：AppTest 无头跑渲染分支 + 列口径 + 两个诊断面板）
-test_realdata.py       真实数据回归（23 项，锁端到端数值，语料缺失自动跳过）
+test_realdata.py       真实数据回归（28 项，锁端到端数值，语料缺失自动跳过）
 samples/               真实语料目录（不进版本控制，见 samples/README.md）
 诊断.bat               拖入 xlsx / xlsx+md 即跑 doctor.py，不用记命令行
 启动工具.bat           双击启动界面
@@ -264,10 +285,10 @@ python doctor.py <xlsx> [md]     # 出问题时的一键诊断（不是测试，
 ```
 
 > `test_pmi_core.py` 的列名驱动与 CTC 场景用例是**现场用 openpyxl 构造**的报告
-> （列序全部打乱、表头带换行与 `(Sec. x)`、实体 ID 用 2~3 位数、基准两套 ID 不相邻），
-> 不依赖外部数据文件，可离线跑。
+> （列序全部打乱、表头带换行与 `(Sec. x)`、实体 ID 用 2~3 位数、基准两套 ID 不相邻、
+> 基准目标实体名用 `placed_datum_target_feature`），不依赖外部数据文件，可离线跑。
 
-真实数据回归当前锁两个测试件（语料见 `samples/README.md`）：
+真实数据回归当前锁三个测试件（语料见 `samples/README.md`）：
 
 | 测试件 | 特征 | 期望 |
 |---|---|---|
@@ -278,6 +299,9 @@ python doctor.py <xlsx> [md]     # 出问题时的一键诊断（不是测试，
 > `ctc_02` 用例的开发侧条目不是真实导出，而是**按 SFA 的 `Saved Views` 列反推**
 > （重现「视图 × 标注」的导出粒度）—— 真实导出数据不进仓库，但用真实报告的结构
 > 一样能锁住 `DUP` 的分组作用域。
+>
+> 同一测试件还锁了基准目标通道：9 条 `placed_datum_target_feature` 必须全部命中，
+> 语义文本里的目标形式（`(point)`）与目标尺寸（`⌀85`）不得顶替标识。
 
 ## 环境
 

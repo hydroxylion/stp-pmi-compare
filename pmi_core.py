@@ -74,6 +74,21 @@ KIND_LAYER = {
 # `Associated Semantic PMI`，或该表的列序变了。
 TA_REF_MIN_HIT = 0.8
 
+# 基准目标的实体名：**同一份 SFA 报告的两个版本写法不同**。
+# ftc_10 写 `datum_target`，ctc_02 / ctc_05 / ftc_06 写 `placed_datum_target_feature`。
+# 只认一种写法会让整批基准目标「静默断链」—— ta 引用能落到语义表（交叉校验全绿），
+# 但后续判据不认这个实体名，结果开发侧全判「多余」、SFA 侧全判「缺失」。
+# 用「含 datum 且含 target」的宽松判据，兼容现有两种写法及后续变体。
+_DATUM_TARGET_ENTITIES = ("datum_target", "placed_datum_target_feature")
+
+
+def is_datum_target_entity(entity: str) -> bool:
+    e = (entity or "").strip().lower()
+    if e in _DATUM_TARGET_ENTITIES:
+        return True
+    return "datum" in e and "target" in e
+
+
 # SFA 语义表里实体类型 -> 条目类别
 def classify_sfa_entity(entity: str) -> str:
     e = (entity or "").strip()
@@ -81,9 +96,24 @@ def classify_sfa_entity(entity: str) -> str:
         return KIND_DIM
     if "datum_system" in e:
         return "datum_system"          # 组合项，不独立对应标注
+    if is_datum_target_entity(e):
+        return KIND_DATUM
     if "tolerance" in e:
         return KIND_GT
     return KIND_GT
+
+
+def is_known_entity(entity: str) -> bool:
+    """该实体名能否归入已知类别。用于加载期体检：新的实体名不该静默落到兜底分支。"""
+    e = (entity or "").strip()
+    if not e:
+        return False
+    return any(k in e for k in (
+        "dimensional_characteristic_representation",
+        "dimensional_size", "dimensional_location",
+        "angular_location", "angular_size",
+        "datum_system", "datum_feature", "tolerance",
+    )) or is_datum_target_entity(e)
 
 
 # --------------------------------------------------------------------------
@@ -328,6 +358,41 @@ def sfa_text_for(text: str, kind: str) -> str:
             fcf = [l for l in lines if _FCF_SYM.search(l)]
         return fcf[0].strip() if fcf else lines[0].strip()
     return " ".join(l.strip() for l in lines)
+
+
+_DT_PAREN = re.compile(r"\([^)]*\)")                            # (point) / (D = 1.)
+_DT_SIZE = re.compile(r"\b\d+(?:[.,]\d+)?\s*[xX]\s*\d*")         # 1.25x2
+_DT_DIA = re.compile(r"(?<![A-Za-z0-9])[DR]\s*\d+(?:[.,]\d+)?")  # D85 / R5（归一化后的 ⌀85）
+_DT_IDENT = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{1,2})(\d{1,3})(?![0-9])")
+
+
+def datum_target_ident(text: str, expect: str = "") -> str:
+    """从 SFA 的基准目标文本里抽出「基准字母 + 目标序号」标识。
+
+    **不能取首片段** —— 标识的位置不固定，实测四种写法：
+
+    | SFA 文本 | 首片段 | 真实标识 |
+    |---|---|---|
+    | `A1 (point)` | A1 | A1 |
+    | `K1 (area)` | K1 | K1 |
+    | `⌀85\\nK1` | ⌀85 | K1 |
+    | `1.25x2\\nC1` | 1.25x2 | C1 |
+
+    `(point)` / `(line)` / `(area)` / `(circular curve)` 是基准目标的**形式**
+    （ASME Y14.5 的 point/line/area datum target），`⌀85` / `1.25x2` 是目标尺寸，
+    都不是标识本身。
+
+    给了 `expect`（开发侧 datum + target id 拼出的期望值）时优先精确找它，
+    比对更稳：`expect='K1'` 在 `⌀85\\nK1` 里能命中，而按位置取首片段会拿到尺寸。
+    """
+    s = normalize(text or "")
+    s = _DT_PAREN.sub(" ", s)
+    if expect:
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(expect)}(?![0-9])", s):
+            return expect
+    s = _DT_DIA.sub(" ", _DT_SIZE.sub(" ", s))
+    m = _DT_IDENT.search(s)
+    return f"{m.group(1)}{m.group(2)}" if m else ""
 
 
 def compare_tokens(dev: Dict[str, Any], sfa: Dict[str, Any]) -> Tuple[str, str]:
@@ -971,6 +1036,22 @@ def _integrity_checks(t: SfaTruth) -> None:
             "对应率过低说明两张表不是同一套标注"
             if common < len(dcn) * 0.5 else "")
 
+    if t.semantic:
+        # 语义表实体名漂移的显式告警。这类问题的表征是「引用完全能落地、
+        # 但判据不认实体名」，装载与引用检查全绿，只有结果表全红 ——
+        # ctc_02 的基准目标就因为 SFA 把 entity 写成 placed_datum_target_feature
+        # 而整批被判「多余 / 缺失」。
+        unknown: Dict[str, int] = {}
+        for v in t.semantic.values():
+            e = (v.get("entity") or "").strip()
+            if e and not is_known_entity(e):
+                unknown[e] = unknown.get(e, 0) + 1
+        add("语义表实体归类", not unknown,
+            "全部已知" if not unknown else f"{len(unknown)} 种未识别",
+            "；".join(f"{k!r} ×{n}" for k, n in sorted(unknown.items()))
+            + " —— 未识别的实体会落到几何公差兜底分支，可能造成整批判错"
+            if unknown else "")
+
 
 # --------------------------------------------------------------------------
 # 内部项目 markdown 解析层
@@ -1299,9 +1380,9 @@ def _lookup_semantic_for_dev(it: DevItem, t: SfaTruth) -> Tuple[List[int], str]:
         return ids, ("dim-2hop" if ids else "none")
 
     if it.kind == KIND_DATUM:
-        # 基准目标（datum_target）：col11 直接给出 datum_target 实体 ID，1 跳
+        # 基准目标（datum_target / placed_datum_target_feature）：col11 直接给出实体 ID，1 跳
         for r in refs:
-            if t.semantic.get(r, {}).get("entity") == "datum_target":
+            if is_datum_target_entity(t.semantic.get(r, {}).get("entity", "")):
                 return [r], "datum_target-1hop"
         # 普通基准：col11 是 datum_feature 的 ID，按 ID 精确查。
         # datum 表与 datum_feature 表是**两套 ID**，不保证相邻（FTC 差 1、CTC 差 3），
@@ -1548,15 +1629,17 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
                     else:
                         sub.status = ST_SUSPECT
                         sub.remark = f"基准标识差异：开发={dev_ident or '-'} SFA={ident or '-'}"
-                elif ent == "datum_target":
-                    # 语义表文本形如 `K1 (area)`，基准目标标识 = 基准字母 + 目标序号
-                    tid = str(it.detail.get("target id", "") or "")
+                elif is_datum_target_entity(ent):
+                    # 语义表文本形如 `A1 (point)` / `⌀85\nK1` / `1.25x2\nC1`：
+                    # 标识两侧可能挂着目标形式与目标尺寸，按位置取首片段会拿到尺寸。
+                    tid = str(it.detail.get("target id")
+                              or it.detail.get("target_id")
+                              or it.detail.get("target") or "")
                     expect = f"{dev_ident}{tid}"
-                    seg = sfa_text_for(t.semantic[sid]["text"], KIND_DATUM) or \
-                        normalize(t.semantic[sid]["text"])
+                    seg = normalize(t.semantic[sid]["text"])
                     sub.sfa_entity, sub.sfa_text = ent, seg
-                    ident = (seg.split() or [""])[0]
-                    if expect and ident.startswith(expect):
+                    ident = datum_target_ident(seg, expect)
+                    if expect and ident and ident == expect:
                         sub.status, sub.remark = ST_HIT, "ID 关联 + 基准目标标识一致"
                     else:
                         sub.status = ST_SUSPECT
@@ -1610,7 +1693,7 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
     for sid, s in t.semantic.items():
         if sid in used_sem:
             continue
-        if s["entity"] == "datum_target":
+        if is_datum_target_entity(s["entity"]):
             rows.append(MatchRow(
                 key=f"SFA-datum-target#{sid}", layer=LAYER_DATUM, kind=KIND_DATUM,
                 sfa_sem_id=sid, sfa_text=normalize(s["text"]), sfa_entity=s["entity"],
@@ -1795,5 +1878,6 @@ __all__ = [
     "SfaTruth", "DevItem", "MatchRow", "Metrics",
     "load_sfa", "parse_dev_markdown", "match_items", "compute_metrics", "summarize",
     "normalize", "sem_tokens", "fix_mojibake", "norm_number",
-    "dev_defects", "symbols_of",
+    "dev_defects", "symbols_of", "datum_target_ident",
+    "is_datum_target_entity", "is_known_entity", "classify_sfa_entity",
 ]

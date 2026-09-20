@@ -1033,6 +1033,146 @@ check("多视图 跨视图的尺寸不判 DUP",
 
 
 # ============================================================
+# 六、基准目标实体名漂移 / 标识两侧缀
+#     覆盖 ctc_02 的整批失配：同一个实体在 SFA 报告里有两种写法 ——
+#     ftc_10 写 `datum_target`，ctc_02 / ctc_05 / ftc_06 写
+#     `placed_datum_target_feature`。旧代码只认前者，引用完全能落到语义表
+#     （装载与引用校验全绿，体检面板看不出问题），但判据不认实体名，
+#     结果开发侧全判「多余」、SFA 侧全判「缺失」。
+#     同批还要处理标识两侧的干扰：`A1 (point)` 的目标形式后缀、
+#     `⌀85\nK1` 与 `1.25x2\nC1` 的目标尺寸前缀 —— 按位置取首片段会拿到尺寸。
+# ============================================================
+def _build_sfa_dt(tmpdir: str) -> str:
+    """基准目标实体名用 `placed_datum_target_feature`（ctc_02 的写法）。"""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    ws = wb.create_sheet("Semantic PMI Summary")
+    ws.append(["Semantic PMI Summary (3)", None, None, None])
+    ws.append(["ID", "Entity", "Expected PMI", "Similar"])
+    for rid, txt in [
+        (3001, "A1 (point)"),          # 标识 + 目标形式
+        (3002, "⌀85\nK1"),             # 目标尺寸 + 标识
+        (3003, "1.25x2\nC1"),          # 目标尺寸（矩形） + 标识
+    ]:
+        ws.append([str(rid), "placed_datum_target_feature", txt, None])
+
+    ws = wb.create_sheet("draughting_callout")
+    ws.append(["draughting_callout  (3)", None])
+    for rid, nm in [(3000, "Datum Target.1"), (3100, "Datum Target.2"),
+                    (3200, "Datum Target.3")]:
+        ws.append([str(rid), nm])
+
+    ws = wb.create_sheet("tessellated_annotation_occurren")
+    ws.append(["tessellated_annotation_occurrence (3)"] + [None] * 11)
+    ws.append(["ID", "name", "styles", "item", "name", "children",
+               "presentation style", "color", "plane", "Associated Geometry",
+               "Associated Semantic PMI", "Saved Views"])
+    for rid, nm, ref in [
+        (3000, "Datum Target.1", "placed_datum_target_feature 3001"),
+        (3100, "Datum Target.2", "placed_datum_target_feature 3002"),
+        (3200, "Datum Target.3", "placed_datum_target_feature 3003"),
+    ]:
+        ws.append([str(rid), nm] + [""] * 8 + [ref, ""])
+
+    path = os.path.join(tmpdir, "dt_sfa.xlsx")
+    wb.save(path)
+    return path
+
+
+_MD_DT = """# PMI 提取结果
+
+## MBD_X
+
+- 标注数量：3 条
+
+### 1. A1
+
+detailData:
+{
+  "handle": "3000",
+  "datum": "A",
+  "name": "Datum Target.1",
+  "target id": "1",
+  "type": "datum_target"
+}
+
+### 2. K1
+
+detailData:
+{
+  "handle": "3100",
+  "datum": "K",
+  "name": "Datum Target.2",
+  "target id": "1",
+  "type": "datum_target"
+}
+
+### 3. C1
+
+detailData:
+{
+  "handle": "3200",
+  "datum": "C",
+  "name": "Datum Target.3",
+  "target id": "1",
+  "type": "datum_target"
+}
+"""
+
+# 实体名判据：两种写法都要认；无关的 datum_feature / datum_system 不能误判
+check("实体名 datum_target 认作基准目标",
+      C.is_datum_target_entity("datum_target"), True)
+check("实体名 placed_datum_target_feature 认作基准目标",
+      C.is_datum_target_entity("placed_datum_target_feature"), True)
+check("实体名 datum_feature 不误判",
+      C.is_datum_target_entity("datum_feature"), False)
+check("实体名 datum_system 不误判",
+      C.is_datum_target_entity("datum_system"), False)
+check("实体归类 基准目标归基准层",
+      C.classify_sfa_entity("placed_datum_target_feature"), C.KIND_DATUM)
+check("实体归类 未知名字不被认作已知",
+      C.is_known_entity("some_future_entity"), False)
+check("实体归类 已知名字通过",
+      all(C.is_known_entity(x) for x in
+          ("datum_system", "datum_target", "placed_datum_target_feature",
+           "dimensional_characteristic_representation", "flatness_tolerance")), True)
+
+# 标识提取：形式后缀与目标尺寸都不能顶替标识
+check("标识提取 形式后缀 (point)", C.datum_target_ident("A1 (point)", "A1"), "A1")
+check("标识提取 形式后缀 (area)", C.datum_target_ident("K1 (area)", "K1"), "K1")
+check("标识提取 目标尺寸在标识前", C.datum_target_ident("D85 K1", "K1"), "K1")
+check("标识提取 矩形目标尺寸在标识前",
+      C.datum_target_ident("1.25x2 C1", "C1"), "C1")
+check("标识提取 形式与尺寸同时出现",
+      C.datum_target_ident("G1 (circular curve) (D = 1.)", "G1"), "G1")
+check("标识提取 无期望值时按形态兜底",
+      C.datum_target_ident("B4 (point)"), "B4")
+check("标识提取 只有尺寸时给空",
+      C.datum_target_ident("D85"), "")
+
+with tempfile.TemporaryDirectory() as _td2:
+    _truth_dt = C.load_sfa(_build_sfa_dt(_td2))
+
+_items_dt, _ = C.parse_dev_markdown_ex(_MD_DT)
+_rows_dt = C.match_items(_truth_dt, _items_dt)
+_m_dt = C.compute_metrics(_rows_dt)
+check("基准目标漂移 走 1 跳引用",
+      C._lookup_semantic_for_dev(_items_dt[0], _truth_dt)[1], "datum_target-1hop")
+check("基准目标漂移 三条全部命中",
+      [r.status for r in _rows_dt if r.dev_name], [C.ST_HIT] * 3)
+check("基准目标漂移 不产生反向缺失",
+      [r.key for r in _rows_dt if r.status == C.ST_MISS], [])
+check("基准目标漂移 基准覆盖率 100", _m_dt.datum_coverage, 100.0)
+check("基准目标漂移 归基准层、不进语义层分母", _m_dt.sem_expected, 0)
+check("基准目标漂移 SFA 侧无多余",
+      [r.key for r in _rows_dt if r.status == C.ST_EXTRA], [])
+check("基准目标漂移 体检项通过",
+      [c.ok for c in _truth_dt.checks if c.name == "语义表实体归类"], [True])
+
+
+# ============================================================
 # 汇总
 # ============================================================
 for f in FAIL:

@@ -58,6 +58,29 @@ MULTIVIEW_CASES = [
     },
 ]
 
+# 基准目标用例：同一实体在 SFA 报告里有两种写法 —— ftc_10 写 `datum_target`，
+# ctc_02 / ctc_05 / ftc_06 写 `placed_datum_target_feature`。只认一种会让整批
+# 基准目标静默断链：引用完全能落到语义表（装载/引用交叉校验全绿），但判据不认
+# 实体名，结果开发侧全判「多余」、SFA 侧全判「缺失」。
+# 另外标识两侧常有干扰 —— `A1 (point)` 的目标形式、`⌀85\nK1` 的目标尺寸，
+# 按位置取首片段会拿到尺寸而不是标识。
+DATUM_TARGET_CASES = [
+    {
+        "xlsx": "nist_ctc_02_asme1_ap242-e2-sfa.xlsx",
+        # name -> (基准字母, 目标序号)。序号取自 STP 的
+        # PLACED_DATUM_TARGET_FEATURE 第 5 个参数，字母是图纸上的基准符号。
+        "targets": {
+            "Datum Target.1": ("A", "1"), "Datum Target.2": ("A", "2"),
+            "Datum Target.3": ("A", "3"), "Datum Target.4": ("B", "1"),
+            "Datum Target.5": ("B", "2"), "Datum Target.6": ("B", "3"),
+            "Datum Target.7": ("B", "4"), "Datum Target.8": ("C", "1"),
+            "Datum Target.10": ("K", "1"),
+        },
+        # 语义文本带干扰的两条：目标尺寸前置（⌀85，circle 形式）
+        "noisy_text": {"Datum Target.10": "D85 K1"},
+    },
+]
+
 
 def _multiview_probe(xlsx: str, t):
     """按 SFA 的 `Saved Views` 列反推「开发侧按视图导出」，返回 (条目, 比对行)。"""
@@ -177,6 +200,47 @@ def main():
               not any(r.defects for r in mrows if r.dev_name in mc["annotations"]),
               [r.key for r in mrows if r.dev_name in mc["annotations"] and r.defects])
         print(f"  条目 {len(items)} 条 → 多视图标记 {len(mv_names)} 个标注")
+        print()
+
+    # ---- 基准目标：实体名漂移 + 标识两侧缀 ----
+    for dc in DATUM_TARGET_CASES:
+        xlp = os.path.join(SFA_DIR, dc["xlsx"])
+        tag = dc["xlsx"].replace("-sfa.xlsx", "")
+        print(f"=== {tag}（基准目标）===")
+        if not os.path.exists(xlp):
+            print(f"  跳过：SFA 报告不存在 {xlp}（可用 PMI_SFA_DIR 指定目录）")
+            continue
+        ran += 1
+
+        t = core.load_sfa(xlp)
+        items, sids = [], {}
+        for i, (nm, (lt, tid)) in enumerate(dc["targets"].items(), 1):
+            items.append(core.DevItem(
+                group="MBD_A", seq=i, title=f"Datum Target {lt}{tid}", name=nm,
+                types=["datum_target"],
+                detail={"datum": lt, "target id": tid, "type": "datum_target"}))
+            sids[nm] = (t.ta.get(nm) or {}).get("sem_refs", [])
+        mrows = core.match_items(t, items)
+        mine = [r for r in mrows if r.dev_name in dc["targets"]]
+        stuck = [r.sfa_sem_id for r in mrows
+                 if r.status == core.ST_MISS and r.sfa_sem_id in
+                 {s for v in sids.values() for s in v}]
+
+        check(f"{tag} 基准目标全部命中",
+              all(r.status == core.ST_HIT for r in mine),
+              {r.dev_name: r.status for r in mine if r.status != core.ST_HIT})
+        check(f"{tag} 基准目标走 datum_target-1hop 通道",
+              {r.path for r in mine} == {"datum_target-1hop"},
+              {r.path for r in mine})
+        check(f"{tag} 基准目标不产生反向缺失", not stuck, stuck)
+        check(f"{tag} 实体名漂移不影响体检结论",
+              not [c for c in t.broken_checks() if c.name == "语义表实体归类"],
+              [c.line() for c in t.broken_checks()])
+        for nm, want in dc.get("noisy_text", {}).items():
+            got = next((r.sfa_text for r in mine if r.dev_name == nm), "")
+            check(f"{tag} {nm} 语义文本原样呈现（含目标尺寸）", got == want, got)
+        print(f"  基准目标 {len(mine)} 条全部命中，语义实体 "
+              f"{[s for v in sids.values() for s in v]}")
         print()
 
     print()
