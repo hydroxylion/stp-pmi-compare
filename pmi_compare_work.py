@@ -702,7 +702,7 @@ if _sfa_stat or _checks:
                 "- 典型原因：拿的是「图形专用」导出（NIST 命名里带 `-tg`，"
                 "只有 tessellated 图形 PMI、没有 `Semantic PMI Summary`）。\n"
                 "- 处理：换用同一测试件的**语义版**报告重跑。下方告警里会列出"
-                "同目录下含 `Semantic PMI Summary` 的候选文件。"
+                "含 `Semantic PMI Summary` 的候选文件（报告同目录或 `PMI_SFA_DIR`）。"
             )
         for _w in _sfa_warn:
             st.warning(_w)
@@ -787,7 +787,7 @@ if st.session_state.rows:
             "——**SFA 报告里没有任何语义 PMI 真值**，两边没有共同基准可比。"
             "这不是提取错误，也不是「多余」：请换用同一测试件的语义版 SFA 报告"
             "（SFA 导出时勾选语义 PMI；NIST 命名里带 `-tg` 的是图形专用变体）。"
-            "展开「🧭 报告体检」可看到同目录下的候选报告。"
+            "展开「🧭 报告体检」可看到候选报告（同目录或 `PMI_SFA_DIR`）。"
         )
     elif _dev_rows and all(r.status == core.ST_EXTRA for r in _dev_rows):
         st.error(

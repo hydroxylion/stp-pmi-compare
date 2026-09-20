@@ -379,10 +379,10 @@ PyCharm 中直接运行 `pmi_compare_work.py` 也可以 —— 脚本内置 bare
 ## 文件结构
 
 ```
-pmi_core.py            比对内核：真值装载 / markdown 解析 / 归一化 / ID 关联 / 指标 / 缺陷检测
+pmi_core.py            比对内核：真值装载 / markdown 解析 / 归一化 / ID 关联 / 指标 / 缺陷检测（`load_sfa` 同时接受路径与文件对象 —— UI 上传给的是 `UploadedFile`，不是路径）
 pmi_compare_work.py    Streamlit 界面（当前主入口）
 doctor.py              一键诊断：结果不对劲时跑一次，产出完整上下文报告
-test_pmi_core.py       内核回归（260 项：指标口径、关联链路、缺陷检测、解析自检、列名驱动、ID 位数与基准通道、多视图复用、实体名漂移、DMIA 通道、图形专用导出）
+test_pmi_core.py       内核回归（266 项：指标口径、关联链路、缺陷检测、解析自检、列名驱动、ID 位数与基准通道、多视图复用、实体名漂移、DMIA 通道、图形专用导出、文件对象入参）
 test_ui_smoke.py       界面冒烟（46 项：AppTest 无头跑渲染分支 + 列口径 + 字段勾选开关 + 两个诊断面板 + 无真值态）
 test_realdata.py       真实数据回归（68 项，锁端到端数值 + 逐 handle 锁既定口径，语料缺失自动跳过）
 samples/               真实语料目录（不进版本控制，见 samples/README.md）

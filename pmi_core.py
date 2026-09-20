@@ -900,6 +900,28 @@ def _pick_exact(names: Sequence[str], name: str) -> Optional[str]:
 _SIBLING_KEY = re.compile(r"^(nist_[a-z]+_\d+)", re.I)
 
 
+def _source_name(src) -> str:
+    """取来源的文件名。
+
+    `src` 可以是路径，也可以是**文件对象** —— Streamlit `file_uploader` 给的是
+    `UploadedFile`（不是路径！直接喂给 `os.path.basename` 会抛
+    `expected str, bytes or os.PathLike object, not UploadedFile`），
+    它带 `.name` 属性，值就是上传时的原始文件名。取不到就返回空串。
+    """
+    try:
+        return os.path.basename(os.fspath(src))
+    except TypeError:
+        return os.path.basename(str(getattr(src, "name", "") or ""))
+
+
+def _source_abspath(src) -> str:
+    """取来源的绝对路径；文件对象没有路径（内容在内存里），返回空串。"""
+    try:
+        return os.path.abspath(os.fspath(src))
+    except TypeError:
+        return ""
+
+
 def _has_semantic_sheet(path: str) -> bool:
     try:
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -911,22 +933,29 @@ def _has_semantic_sheet(path: str) -> bool:
         wb.close()
 
 
-def suggest_reports_with_truth(path: str, limit: int = 4) -> List[str]:
+def suggest_reports_with_truth(path, limit: int = 4) -> List[str]:
     """找「含语义 PMI」的兄弟报告，供「导错文件」时给出可行替代。
 
     导错文件是这类 0% 结果的头号原因（图形专用变体没有 `Semantic PMI Summary`），
     而区分两份报告的唯一可靠特征就是这张表在不在。只读表名、不解析内容，代价很低；
     按文件名里的案例号（`nist_ftc_08`）收窄候选，避免把整个目录扫一遍。
 
+    `path` 可以是路径，也可以是文件对象（UI 上传场景）：后者没有所在目录，
+    同目录这一步自动跳过，只剩 `PMI_SFA_DIR` 这一路 —— 而导出件常被拖到桌面、
+    标准件在 `PMI_SFA_DIR`，所以这条退化路径恰好覆盖最常见的用法。
+
     搜索顺序：报告同目录 → 环境变量 `PMI_SFA_DIR`（NIST 标准件目录常与工作目录分离）。
     纯提示，不参与任何判定；找不到就返回空列表。
     """
     import glob as _glob
 
-    m = _SIBLING_KEY.match(os.path.basename(path))
+    name = _source_name(path)
+    m = _SIBLING_KEY.match(name)
     key = m.group(1).lower() if m else ""
-    me = os.path.abspath(path)
-    dirs = [os.path.dirname(me)]
+    me = _source_abspath(path)
+    dirs: List[str] = []
+    if me:
+        dirs.append(os.path.dirname(me))
     env_dir = os.environ.get("PMI_SFA_DIR", "")
     if env_dir:
         dirs.append(env_dir)
@@ -940,7 +969,10 @@ def suggest_reports_with_truth(path: str, limit: int = 4) -> List[str]:
             low = os.path.basename(full).lower()
             if not low.endswith((".xlsx", ".xlsm")) or low.startswith("~$"):
                 continue
-            if os.path.abspath(full) == me or os.path.abspath(full) in out:
+            # 排除自己：有路径时比绝对路径，文件对象时比文件名
+            if (me and os.path.abspath(full) == me) or (name and low == name.lower()):
+                continue
+            if os.path.abspath(full) in out:
                 continue
             if _has_semantic_sheet(full):
                 out.append(full)
@@ -982,15 +1014,22 @@ def _open_table(wb, t: SfaTruth, key: str, prefix: str, aliases: Sequence[str],
     return rows, cr
 
 
-def load_sfa(path: str) -> SfaTruth:
+def load_sfa(path) -> SfaTruth:
     """读取 SFA 报告，建立 ID 索引。
+
+    `path` 可以是**文件路径**，也可以是**文件对象**（Streamlit `file_uploader`
+    的 `UploadedFile`、`BytesIO`）—— openpyxl 两种都收。差别只在「找同目录兄弟
+    报告」这类路径语义：文件对象没有目录，那一路自动跳过，提示改走 `PMI_SFA_DIR`。
+    早期版本直接对入参做 `os.path.basename`，UI 一上传就抛
+    `expected str, bytes or os.PathLike object, not UploadedFile`。
 
     列位置一律**按表头列名定位**，不写死列号。SFA 的列数与列序随版本和导出勾选变化
     （实测 tessellated 表 12~14 列、dcr 表 17~20 列），写死列号会造成静默失配 ——
     曾经因此整表被跳过，结果表全判「多余 / 缺失」。
     识别不到表头时才退回默认列号，并在 recipe.notes 与 warnings 里显式说明。
     """
-    t = SfaTruth(path=path)
+    src_name = _source_name(path)
+    t = SfaTruth(path=src_name)
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     t.sheets = list(wb.sheetnames)
 
@@ -1222,8 +1261,10 @@ def load_sfa(path: str) -> SfaTruth:
         tip = ("该 SFA 报告不含任何语义 PMI：既没有 `Semantic PMI Summary`，"
                "也没有 `draughting_callout` / `datum` 可作真值。"
                "开发侧的条目**无从比对**（不是提取错误），内容级比对不成立。")
+        if src_name:
+            tip += f"（当前文件：`{src_name}`）"
         if alt:
-            tip += ("同目录下这些报告含 `Semantic PMI Summary`，应该才是你要比对的那份："
+            tip += ("这些报告含 `Semantic PMI Summary`，应该才是你要比对的那份："
                     + "；".join(os.path.basename(x) for x in alt)
                     + "。若手上还有同一测试件的其它导出（例如不带 `-tg` 的版本），"
                       "优先换用那一份。")

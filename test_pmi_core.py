@@ -1558,6 +1558,70 @@ check("一侧真的缺数量标注仍要报 CNT", _go_codes2, [C.DF_CNT])
 
 
 # ============================================================
+# 文件对象入参（UI 上传场景）
+#
+# Streamlit `file_uploader` 给的是 `UploadedFile` —— 一个 BytesIO 加 `.name`
+# （上传时的原始文件名），**不是路径**。早期 `load_sfa` 上来就 `os.path.basename(path)`，
+# UI 里一点「开始比对」就报 `SFA 报告解析失败：expected str, bytes or os.PathLike
+# object, not UploadedFile`。内核必须同时吃路径和文件对象：
+# 差别只在「同目录找兄弟报告」这类路径语义 —— 文件对象没有目录，那一路跳过。
+# ============================================================
+class _FakeUpload(io.BytesIO):
+    """最小复刻 Streamlit UploadedFile：BytesIO + 上传时的原始文件名。"""
+
+    def __init__(self, data: bytes, name: str):
+        super().__init__(data)
+        self.name = name
+
+
+with tempfile.TemporaryDirectory() as _td_u:
+    _up_path = _build_sfa(_td_u)
+    with open(_up_path, "rb") as _f:
+        _up_bytes = _f.read()
+    _up_name = os.path.basename(_up_path)
+    try:
+        _t_file = C.load_sfa(_FakeUpload(_up_bytes, _up_name))
+        _up_err = ""
+    except Exception as _e:                    # noqa: BLE001
+        _t_file, _up_err = None, f"{type(_e).__name__}: {_e}"
+    _t_pathv = C.load_sfa(_up_path)
+
+check("文件对象入参不再抛异常（UploadedFile 场景）", _up_err, "")
+if _t_file is not None:
+    check("文件对象入参 与路径入参 结果一致",
+          (len(_t_file.semantic), len(_t_file.dc), len(_t_file.ta), len(_t_file.datum)),
+          (len(_t_pathv.semantic), len(_t_pathv.dc), len(_t_pathv.ta),
+           len(_t_pathv.datum)))
+    check("文件对象入参 体检结论与路径入参一致",
+          [c.name for c in _t_file.broken_checks() if not c.ok],
+          [c.name for c in _t_pathv.broken_checks() if not c.ok])
+    check("文件对象入参 保留上传时的文件名（供导错文件提示）",
+          _t_file.path, _up_name)
+
+check("_source_name 同时吃路径与文件对象",
+      (C._source_name(r"C:\tmp\nist_ftc_08-sfa.xlsx"),
+       C._source_name(_FakeUpload(b"", "nist_ftc_08-sfa.xlsx"))),
+      ("nist_ftc_08-sfa.xlsx", "nist_ftc_08-sfa.xlsx"))
+
+# 文件对象没有所在目录，「同目录找兄弟报告」必然落空 → 必须靠 PMI_SFA_DIR 兜住。
+# 这正是 UI 的常态：导出件从浏览器传上来，标准件目录只能靠环境变量告诉工具。
+with tempfile.TemporaryDirectory() as _td_u2:
+    _write_min_semantic(os.path.join(_td_u2, "nist_ftc_08_asme1_ap242-e2-sfa.xlsx"))
+    _env_old3 = os.environ.get("PMI_SFA_DIR")
+    os.environ["PMI_SFA_DIR"] = _td_u2
+    try:
+        _sug3 = C.suggest_reports_with_truth(
+            _FakeUpload(b"", "nist_ftc_08_asme1_ap242-e1-tg-sfa.xlsx"))
+    finally:
+        if _env_old3 is None:
+            os.environ.pop("PMI_SFA_DIR", None)
+        else:
+            os.environ["PMI_SFA_DIR"] = _env_old3
+check("文件对象入参：兄弟报告提示退化为扫 PMI_SFA_DIR",
+      [os.path.basename(x) for x in _sug3], ["nist_ftc_08_asme1_ap242-e2-sfa.xlsx"])
+
+
+# ============================================================
 # 汇总
 # ============================================================
 for f in FAIL:
