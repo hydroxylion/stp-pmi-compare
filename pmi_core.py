@@ -237,6 +237,31 @@ def _fix_token(tok: str) -> str:
 
 _NUM = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 
+# SFA 在**复合公差（composite tolerance）的后续段**上标注它归属哪条复合公差，
+# 形如 `(composite with 486)`，排在单元格末行：
+#
+#     ⌓ | 0.2 | A
+#        ▽
+#        ⎹
+#        [D]
+#     (composite with 486)
+#
+# 这是**溯源元数据**（该段属于 486 号复合公差），不是 PMI 内容本身，两侧通道
+# （语义表 / 图形 ta 表）都可能带。必须抹掉的理由有两条：
+#   1. 括号里的数字会被 `_NUM` 当公差数值收进指纹 —— 一旦它落在取片段的那一行，
+#      就会凭空多出一个数值，产生「开发侧数值缺失」这类假判；
+#   2. 展示层（`SfaTruth.path` 反查出的「SFA 有、开发侧未提取」行走 `normalize`）
+#      会把它原样摊给用户看，噪声大且容易被误读成真值的一部分。
+# 注意**只删这一种括号**：`[C]` / `<ST>` 这类是修饰符，`normalize` 里刻意保留。
+_COMPOSITE_WITH = re.compile(r"\(\s*composite\s+with\s+\d+\s*\)", re.IGNORECASE)
+
+
+def strip_composite_marker(text: str) -> str:
+    """抹掉 `(composite with <id>)` 溯源标注。展示与指纹两侧共用同一条规则。"""
+    if not text:
+        return "" if text is None else str(text)
+    return _COMPOSITE_WITH.sub(" ", str(text))
+
 
 def norm_number(x: str) -> str:
     """数值规范化：去前导零 / 统一小数位 / 消浮点噪声。
@@ -256,13 +281,13 @@ def norm_number(x: str) -> str:
 
 
 def normalize(text: str, *, keep_sep: bool = True) -> str:
-    """结构化归一化：乱码修复 -> 符号统一 -> 数值规范化 -> 空白压缩。
+    """结构化归一化：去溯源标注 -> 乱码修复 -> 符号统一 -> 数值规范化 -> 空白压缩。
 
     保留 `|` 分隔语义（基准序列 `A | B | C`），不再抹掉。
     """
     if text is None:
         return ""
-    s = str(text)
+    s = strip_composite_marker(text)
     s = _fix_token(s)
     # 不要误删 <ST> / [C] 这类修饰符
     for k, v in SYMBOL_MAP.items():
@@ -360,8 +385,10 @@ def sfa_text_for(text: str, kind: str) -> str:
 
     必须返回原文：修饰符（`Ⓜ`）、直径符（`⌀`）等字形一旦归一化就丢失，
     后续 sem_tokens / symbols_of 只能靠字形判定修饰符与符号，不可提前转换。
+    唯一例外是 `(composite with <id>)` 溯源标注 —— 它是元数据不是内容，
+    且自带数字，先抹掉再切片（见 `strip_composite_marker`）。
     """
-    lines = [l for l in (text or "").split("\n") if l.strip()]
+    lines = [l.strip() for l in strip_composite_marker(text).split("\n") if l.strip()]
     if not lines:
         return ""
     if kind == KIND_GT:
@@ -2352,6 +2379,7 @@ __all__ = [
     "SfaTruth", "DevItem", "MatchRow", "Metrics",
     "load_sfa", "parse_dev_markdown", "match_items", "compute_metrics", "summarize",
     "normalize", "sem_tokens", "fix_mojibake", "norm_number",
+    "strip_composite_marker", "sfa_text_for",
     "dev_defects", "symbols_of", "datum_target_ident", "suggest_reports_with_truth",
     "is_datum_target_entity", "is_known_entity", "classify_sfa_entity",
 ]

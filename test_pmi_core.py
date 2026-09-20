@@ -1660,6 +1660,41 @@ check("文件对象入参：兄弟报告提示退化为扫 PMI_SFA_DIR",
 
 
 # ============================================================
+# 九、SFA 溯源标注 `(composite with <id>)`
+#
+# 复合公差的后续段，SFA 会在单元格末行标注它归属哪条复合公差：
+#     ⌓ | 0.2 | A / ▽ / ⎹ / [D] / (composite with 486)
+# 这是元数据不是 PMI 内容，且括号里带数字。旧版独立引擎（现已废弃的
+# `pmi_compare_work.py` 上半部）里有这条清洗，迁到 pmi_core 时漏了，
+# 于是「SFA 有、开发侧未提取」的反查行把它原样摊在结果表里。
+# ============================================================
+_COMP_RAW = "⌓ | 0.2 | A \n   ▽\n   ⎹\n   [D]\n(composite with 486)"
+
+check("溯源标注 归一化后不再含 composite with",
+      "composite" in C.normalize(_COMP_RAW), False)
+check("溯源标注 归一化后不含括号内编号 486",
+      "486" in C.normalize(_COMP_RAW), False)
+check("溯源标注 归一化保留 FCF 本体与后段基准",
+      C.normalize(_COMP_RAW), "⌓ | 0.2 | A ▽ ⎹ [D]")
+check("溯源标注 指纹不把编号当公差数值",
+      C.sem_tokens(_COMP_RAW)["numbers"], ["0.2"])
+check("溯源标注 大小写 / 空格变体同样抹掉",
+      C.strip_composite_marker("( COMPOSITE  with  488 )").strip(), "")
+check("溯源标注 不误伤 [C] / <ST> 这类修饰符",
+      C.strip_composite_marker("⌖ | ⌀0.02 Ⓜ | D | B | C [C] <ST>"),
+      "⌖ | ⌀0.02 Ⓜ | D | B | C [C] <ST>")
+check("溯源标注 sfa_text_for 取片段时也已抹掉",
+      C.sfa_text_for(_COMP_RAW, C.KIND_GT), "⌓ | 0.2 | A")
+# 单行写法（图形 ta 表可能整条渲染在一行）也必须干净
+check("溯源标注 与 FCF 同行时取片段不含标注",
+      C.sfa_text_for("⌓ | 0.12 | A (composite with 488)", C.KIND_GT),
+      "⌓ | 0.12 | A")
+# 反查行（SFA 有、开发侧无）走的是 normalize，展示层必须干净
+check("溯源标注 反查行展示文本已清洗",
+      "composite" in C.normalize("⌓ | 1.2 | A \n ▽\n ⎹\n [D]"), False)
+
+
+# ============================================================
 # 汇总
 # ============================================================
 for f in FAIL:
