@@ -200,9 +200,13 @@ def main():
     # ---------------- 3. ID 索引规模 ----------------
     head("3. ID 索引规模")
     out(f"语义表条目        : {len(t.semantic)}")
+    out(f"语义真值          : "
+        + ("**缺失**（无语义表 / datum / datum_feature —— 图形专用导出）"
+           if t.truth_missing else "有"))
     out(f"draughting_callout: {len(t.dc)}")
     out(f"图形标注关联      : {len(t.ta)}   "
-        f"({t.link_channel or '两种关联表都缺失'}，{t.ta_cols} 列)")
+        f"({t.link_channel or '两种关联表都缺失'}，{t.ta_cols} 列)"
+        + ("　← 关联键列缺失，本表不提供任何语义引用" if t.graphic_only else ""))
     out(f"datum             : {len(t.datum)}")
     out(f"dcr               : {len(t.dcr_by_dim)}")
     out(f"单位              : {t.units or '未识别'}")
@@ -210,6 +214,12 @@ def main():
     if t.semantic:
         kinds = collections.Counter(v["kind"] for v in t.semantic.values())
         out(f"语义实体分类      : {dict(kinds)}")
+    if t.truth_missing:
+        out()
+        out("  【结论】这份报告不含任何语义 PMI，SFA 侧没有可比真值：")
+        out("    开发侧的每一条都判「⛔ 无可比真值」，既不进召回率也不进精确率。")
+        out("    这不是「开发侧提取全错」，而是「选错了报告文件」。换用同一测试件的")
+        out("    语义版导出后重跑即可（NIST 命名里带 `-tg` 的是图形专用变体）。")
 
     # ---------------- 4. 交叉校验 ----------------
     head("4. 加载期交叉校验")
@@ -289,11 +299,19 @@ def main():
         out(f"状态分布     : {dict(collections.Counter(r.status for r in rows))}")
         out(f"关联路径分布 : {core.link_stats(rows)}")
         out()
-        out(f"召回率 {m.recall:.2f}% | 精确率 {m.precision:.2f}% | 基准覆盖率 {m.datum_coverage:.2f}%")
+        if m.truth_missing:
+            # 无真值时三个比率都没有意义 —— 打 0% 会读成「开发侧全错提取」。
+            out("召回率 N/A | 精确率 N/A | 基准覆盖率 N/A"
+                f"　（SFA 侧无真值，不可比 {m.no_truth} 条）")
+            out("  ↑ 该 SFA 报告不含语义 PMI，三项指标不成立（不是 0%）。")
+            out("    开发侧条目全部记为「⛔ 无可比真值」，请换用语义版报告后重跑。")
+        else:
+            out(f"召回率 {m.recall:.2f}% | 精确率 {m.precision:.2f}% | 基准覆盖率 {m.datum_coverage:.2f}%")
         out(f"  语义: 期望 {m.sem_expected} / 提取 {m.sem_extracted} / 命中 {m.sem_hit}"
             f" / 缺失 {m.sem_miss} / 多余 {m.sem_extra} / 差异 {m.sem_diff} / 疑似 {m.sem_suspect}")
         out(f"  基准: 期望 {m.datum_expected} / 命中 {m.datum_hit}")
         out(f"  注释: 共 {m.note_total} / 图形有文本 {m.note_graphic_only} / 内部独占 {m.note_exclusive}")
+        out(f"  不可比: {m.no_truth}（SFA 侧无真值，不进任何分母）")
         out(f"  缺陷: 条目 {m.defect_rows} / 总数 {m.defect_total}"
             f" / 占比 {m.defect_rate:.2f}% {m.defect_by_code}")
 
@@ -337,7 +355,12 @@ def main():
         bad_rows = [r for r in rows if r.status not in (core.ST_HIT, core.ST_NOTE)]
         if bad_rows:
             out()
-            out(f"非命中条目（{len(bad_rows)} 条，列前 40）：")
+            if m.truth_missing:
+                out(f"不可比条目（{len(bad_rows)} 条，全部为「{core.ST_ABSENT}」；"
+                    f"换用语义版报告后这里才会有真正的判定）：")
+                bad_rows = bad_rows[:10]
+            else:
+                out(f"非命中条目（{len(bad_rows)} 条，列前 40）：")
             for r in bad_rows[:40]:
                 out(f"  {r.status:16s} {r.key:18s} {r.dev_title[:24]:26s}"
                     f" SFA={r.sfa_text[:30]!r} path={r.path} {' '.join(r.defects)}")

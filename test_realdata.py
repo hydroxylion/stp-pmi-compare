@@ -50,6 +50,30 @@ CASES = [
         "defects": 8,
         "defect_codes": {"SYM 符号丢失": 8},
     },
+    {
+        # ftc_08 的**正确**配对：开发侧 markdown 与 `-e2` 报告 52/52 handle 全对上。
+        # 提醒：同一测试件的 `-e1-tg` 变体是「图形专用」导出（见 GRAPHIC_ONLY_CASES），
+        # 拿它来比会得到满屏 0% —— 本用例同时锁住「换对文件后是什么数字」。
+        "md": "samples/dev_ftc_08.md",
+        "xlsx": "nist_ftc_08_asme1_ap242-e2-sfa.xlsx",
+        "recall": 90.7, "precision": 90.7, "datum": 100.0,
+        "defects": 8,
+        "defect_codes": {"NUM 数值缺失": 3, "SYM 符号丢失": 5},
+    },
+]
+
+# 图形专用导出：ta 表在，但表头里没有 `Associated Semantic PMI`，整份报告也没有
+# `Semantic PMI Summary` —— SFA 侧零真值。此时**必须**判「⛔ 无可比真值」，
+# 而不是让开发侧 52 条全部显示「⚠️ 多余、精确率 0%」（那看起来像开发侧全错提取，
+# 实际是选错了报告文件）。旧代码在表头识别成功时仍给缺列套默认列号，关联键的默认值
+# 10 正好落在 `Saved Views` 上，于是从相机/视图 ID 里抠出 116 条假引用。
+GRAPHIC_ONLY_CASES = [
+    {
+        "md": "samples/dev_ftc_08.md",
+        "xlsx": "nist_ftc_08_asme1_ap242-e1-tg-sfa.xlsx",
+        # 同目录下应该被指出来的替代报告
+        "suggest": "nist_ftc_08_asme1_ap242-e2-sfa.xlsx",
+    },
 ]
 
 FAIL = []
@@ -252,6 +276,51 @@ def main():
             check(f"{tag} {nm} 语义文本原样呈现（含目标尺寸）", got == want, got)
         print(f"  基准目标 {len(mine)} 条全部命中，语义实体 "
               f"{[s for v in sids.values() for s in v]}")
+        print()
+
+    # ---- 图形专用导出：无真值要判「不可比」，不能判「多余」 ----
+    for gc in GRAPHIC_ONLY_CASES:
+        xlp = os.path.join(SFA_DIR, gc["xlsx"])
+        tag = gc["xlsx"].replace("-sfa.xlsx", "")
+        print(f"=== {tag}（图形专用导出）===")
+        if not os.path.exists(xlp):
+            print(f"  跳过：SFA 报告不存在 {xlp}（可用 PMI_SFA_DIR 指定目录）")
+            continue
+        ran += 1
+
+        t = core.load_sfa(xlp)
+        raw = open(os.path.join(HERE, gc["md"].replace("/", os.sep)),
+                   encoding="utf-8", errors="replace").read()
+        items, _ = core.parse_dev_markdown_ex(raw)
+        rows = core.match_items(t, items)
+        m = core.compute_metrics(rows)
+        dev = [r for r in rows if not r.key.startswith("SFA") and r.kind != core.KIND_NOTE]
+
+        check(f"{tag} 判定为图形专用导出", t.graphic_only, True)
+        check(f"{tag} 判定为无真值", t.truth_missing and m.truth_missing,
+              (t.truth_missing, m.truth_missing))
+        check(f"{tag} 关联通道判定为不可用", not t.link_channel, t.link_channel)
+        check(f"{tag} 不按默认列号抠出 Saved Views 的假引用",
+              not [r for r in t.ta.values() if r["sem_refs"]],
+              [r["sem_refs"] for r in t.ta.values() if r["sem_refs"]][:3])
+        check(f"{tag} 开发侧全判「⛔ 无可比真值」",
+              {r.status for r in dev} == {core.ST_ABSENT},
+              sorted({r.status for r in dev}))
+        check(f"{tag} 不产生任何「⚠️ 多余」", m.sem_extra == 0, m.sem_extra)
+        check(f"{tag} 不进语义指标分母",
+              m.sem_expected == 0 and m.datum_expected == 0,
+              (m.sem_expected, m.datum_expected))
+        check(f"{tag} 不可比条目数 = 开发侧非注释条目数", m.no_truth == len(dev),
+              (m.no_truth, len(dev)))
+        check(f"{tag} 体检点名关联键列与语义真值",
+              sorted(c.name for c in t.broken_checks() if not c.ok)
+              == ["draughting_model_item_associati 装载", "ta 引用可解释",
+                  "图形标注关联通道", "图形标注关联键列", "语义真值"],
+              sorted(c.name for c in t.broken_checks() if not c.ok))
+        check(f"{tag} 指出同目录含语义 PMI 的替代报告",
+              any(gc["suggest"] in w for w in t.warnings), t.warnings)
+        print(f"  开发侧 {len(dev)} 条 → 全部「{core.ST_ABSENT}」；"
+              f"提示改用 {gc['suggest']}")
         print()
 
     print()

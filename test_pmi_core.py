@@ -13,7 +13,7 @@ import io, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pmi_core as C
 
-DEFAULT_XLSX = r"F:\1【机械零件】\Step官方标准数据\NIST-PMI-STEP-Files\nist_ftc_07_asme1_ap242-e2-sfa-1.xlsx"
+DEFAULT_XLSX = r"F:\1【机械零件】\Step官方标准数据\NIST-PMI-STEP-Files\nist_ftc_07_asme1_ap242-e2-sfa.xlsx"
 XLSX = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_XLSX
 
 # (group, handle, name, title, type, extra)
@@ -184,7 +184,10 @@ if not os.path.exists(XLSX):
     print("   可执行： python test_pmi_core.py <你的SFA报告.xlsx>")
 else:
     t = C.load_sfa(XLSX)
-    check("SFA 工作表数", len(t.sheets), 113)
+    # 工作表数只做「像不像一份完整报告」的粗筛，不锁死具体值：SFA 会把文件里出现的
+    # 每一种实体类型都单独列一张表，同一测试件的不同导出差几十张是正常的
+    # （实测 ftc_07 113~145、ftc_08 80~115）。锁死数值只会让换一份导出就红。
+    check("SFA 工作表数（粗筛）", len(t.sheets) > 50, True)
     check("SFA 语义项数", len(t.semantic), 49)
     check("SFA draughting_callout 行数", len(t.dc), 53)
     check("SFA 图形注释行数", len(t.ta), 53)
@@ -367,7 +370,7 @@ def _build_sfa(tmpdir: str) -> str:
     # 语义表：注意 2002 号把「尺寸行 + FCF 行」揉在一行
     ws = wb.create_sheet("Semantic PMI Summary")
     ws.append(["Semantic PMI Summary (5)", None, None, None])
-    ws.append(["ID", "Entity", "Expected PMI", "Similar"])
+    ws.append(["ID", "Entity", "Semantic PMI", "Similar"])
     for rid, ent, txt in [
         (1001, "datum_system", "A | B"),
         (2001, "position_tolerance", "⌖ | ⌀0.8 | A | B"),
@@ -1050,7 +1053,7 @@ def _build_sfa_dt(tmpdir: str) -> str:
 
     ws = wb.create_sheet("Semantic PMI Summary")
     ws.append(["Semantic PMI Summary (3)", None, None, None])
-    ws.append(["ID", "Entity", "Expected PMI", "Similar"])
+    ws.append(["ID", "Entity", "Semantic PMI", "Similar"])
     for rid, txt in [
         (3001, "A1 (point)"),          # 标识 + 目标形式
         (3002, "⌀85\nK1"),             # 目标尺寸 + 标识
@@ -1190,7 +1193,7 @@ def _build_sfa_dmia(tmpdir: str) -> str:
 
     ws = wb.create_sheet("Semantic PMI Summary")
     ws.append(["Semantic PMI Summary (3)", None, None, None])
-    ws.append(["ID", "Entity", "Expected PMI", "Similar"])
+    ws.append(["ID", "Entity", "Semantic PMI", "Similar"])
     for rid, ent, txt in [
         (4001, "position_tolerance", "⌖ | ⌀0.8 | A"),
         (4002, "placed_datum_target_feature", "1.25x2\nC1"),
@@ -1245,7 +1248,7 @@ def _build_sfa_nolink(tmpdir: str) -> str:
     wb.remove(wb.active)
     ws = wb.create_sheet("Semantic PMI Summary")
     ws.append(["Semantic PMI Summary (1)", None, None, None])
-    ws.append(["ID", "Entity", "Expected PMI", "Similar"])
+    ws.append(["ID", "Entity", "Semantic PMI", "Similar"])
     ws.append(["4001", "position_tolerance", "⌖ | ⌀0.8 | A", None])
     ws = wb.create_sheet("draughting_callout")
     ws.append(["draughting_callout  (1)", None])
@@ -1334,6 +1337,208 @@ check("新增 ASME 符号被识别（圆跳动/全跳动/圆度）",
       sorted(C.symbols_of("↗ | 0.035 | A-B") | C.symbols_of("⌰ | 0.015 | B")
              | C.symbols_of("○ | 0.002")),
       ["↗", "⌰", "○"])
+
+
+# ============================================================
+# 八、图形专用导出（ta 表在、但没有关联键列）
+#     覆盖 ftc_08 `-e1-tg`：ta 表 12 列，表头里**没有** `Associated Semantic PMI`，
+#     整份报告也没有 `Semantic PMI Summary`。三个坑叠在一起：
+#       1. `_locate` 过去在表头识别成功时仍给缺列套默认列号 —— 关联键的默认值 10
+#          正好落在 `Saved Views` 上，于是从 `camera_model_d3 58866 (MBD_A)` 抠出
+#          一堆假引用（实测该报告 116 条），把「关联键不存在」伪装成「引用无法解释」；
+#       2. SFA 侧零真值，开发侧每一条都被判「⚠️ 多余」，精确率 0% —— 看起来像
+#          「开发侧全错提取」，实际是「选错了报告文件」；
+#       3. `draughting_model_item_association` 指向的是 tessellated 标注本身而非
+#          draughting_callout，兜不住底。
+#     期望：不产生假引用、判「⛔ 无可比真值」、体检点名、并指出同目录里含语义 PMI
+#     的那份报告。
+# ============================================================
+def _build_sfa_graphic_only(tmpdir: str,
+                            name: str = "nist_ftc_08_asme1_ap242-e1-tg-sfa.xlsx") -> str:
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    ws = wb.create_sheet("tessellated_annotation_occurren")
+    ws.append(["tessellated_annotation_occurrence  (2)"] + [None] * 11)
+    ws.append([None] * 12)
+    ws.append([f"列{i}" for i in range(1, 13)])
+    # 表头照抄 ftc_08：**没有** Associated Semantic PMI / Equivalent Unicode String
+    ws.append(["ID", "name", "styles", "item", "name", "children",
+               "presentation style", "color", "plane", "Associated Geometry",
+               "Saved Views", "Validation Properties"])
+    ws.append(["25921", "Flatness.1", "(1) presentation_style_assignment 25916",
+               "tessellated_geometric_set 25911", "flatness",
+               "(63) tessellated_curve_set", "curve_style 25917",
+               "draughting_pre_defined_colour 25919  (white)",
+               "annotation_plane 27316\n(A1)",
+               "(1) shape_aspect 55861\n(1) complex_triangulated_face 7581",
+               "camera_model_d3 58866 (MBD_A)",
+               "property definition 59376\n(pmi validation property)"])
+    ws.append(["26231", "Simple Datum.1", "(1) presentation_style_assignment 26226",
+               "tessellated_geometric_set 26221", "datum",
+               "(10) tessellated_curve_set", "curve_style 26227",
+               "draughting_pre_defined_colour 26229  (white)",
+               "annotation_plane 27316\n(A1)",
+               "(1) shape_aspect 55861",
+               "camera_model_d3 58866 (MBD_A)",
+               "property definition 59466\n(pmi validation property)"])
+
+    # 关联表在，但指向 tessellated 标注本身 + shape_aspect（纯几何），兜不住语义
+    ws = wb.create_sheet("draughting_model_item_associati")
+    ws.append(["draughting_model_item_association  (2)"] + [None] * 5)
+    ws.append(["ID", "name", "description", "definition", "used_representation",
+               "identified_item"])
+    for rid, nm, ta_id in [(55876, "Flatness.1", 25921),
+                           (55886, "Simple Datum.1", 26231)]:
+        ws.append([str(rid), nm, "", "shape_aspect 55861",
+                   "draughting_model 25280",
+                   f"tessellated_annotation_occurrence {ta_id}"])
+
+    ws = wb.create_sheet("shape_aspect")
+    ws.append(["shape_aspect  (2)"] + [None] * 4)
+    ws.append(["ID", "name", "description", "of_shape", "product_definitional"])
+    ws.append(["55861", "Flatness.1", "", "product_definition_shape 56", "True"])
+
+    path = os.path.join(tmpdir, name)
+    wb.save(path)
+    return path
+
+
+def _write_min_semantic(path: str) -> str:
+    """最小「含语义 PMI」报告，只为验证「兄弟报告提示」能认出它。"""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("Semantic PMI Summary")
+    ws.append(["Semantic PMI Summary (1)", None, None, None])
+    ws.append(["ID", "Entity", "Semantic PMI", "Similar"])
+    ws.append(["55861", "flatness_tolerance", "▱ | 0.03", None])
+    wb.save(path)
+    return path
+
+
+# 列定位：表头在手时，找不到的列必须是 None，不能套默认列号
+_cr_gap = C._locate([["ID", "name", "Saved Views"], ["1", "a", "x"]],
+                    ("id", "name"),
+                    ("id", "name", "associated semantic pmi"),
+                    (0, 1, 10))
+check("列名定位 缺列不再套默认列号",
+      _cr_gap.resolved["associated semantic pmi"], None)
+check("列名定位 缺列有留痕", _cr_gap.notes, ["表头未见 `associated semantic pmi`，"
+      "该列按**不存在**处理（不套默认列号 10 —— 位置已变，按位置取会读到别的列）"])
+check("列名定位 id 仍回落第 1 列",
+      C._locate([["name", "item"], ["a", "b"]], ("id", "name"), ("id", "name"),
+                (0, 1)).resolved["id"], 0)
+
+with tempfile.TemporaryDirectory() as _td_go:
+    _go_path = _build_sfa_graphic_only(_td_go)
+    _sib_path = _write_min_semantic(
+        os.path.join(_td_go, "nist_ftc_08_asme1_ap242-e2-sfa.xlsx"))
+    _go = C.load_sfa(_go_path)
+    _sug = C.suggest_reports_with_truth(_go_path)
+
+check("图形专用导出 被识别为 graphic_only", _go.graphic_only, True)
+check("图形专用导出 关联键列记为不存在",
+      _go.recipe("ta").resolved["associated semantic pmi"], None)
+check("图形专用导出 图形文本列记为不存在",
+      _go.recipe("ta").resolved["equivalent unicode string"], None)
+check("图形专用导出 不按默认列号从 Saved Views 抠假引用",
+      [r["sem_refs"] for r in _go.ta.values()], [[], []])
+check("图形专用导出 表内条目仍装载（有结构没内容）", _go.recipe("ta").n_loaded, 2)
+check("图形专用导出 数据行仍能数出来", _go.recipe("ta").n_rows, 2)
+check("图形专用导出 关联通道判定为不可用", _go.link_channel, "")
+check("图形专用导出 判定为无真值", _go.truth_missing, True)
+check("图形专用导出 体检点名四项",
+      sorted(c.name for c in _go.broken_checks()),
+      ["draughting_model_item_associati 装载", "ta 引用可解释",
+       "图形标注关联通道", "图形标注关联键列", "语义真值"])
+check("图形专用导出 装载告警不把「按设计产不出」说成列定位错位",
+      [c.detail for c in _go.broken_checks()
+       if c.name.endswith("draughting_model_item_associati 装载")],
+      ["该报告没有 `draughting_callout` 表，关联表的 `identified_item` "
+       "指向的是 tessellated 标注本身、而不是 callout，"
+       "本表按设计产出不了关联条目（不是列定位错位）"])
+check("图形专用导出 告警点名缺列",
+      any("Associated Semantic PMI" in w for w in _go.warnings), True)
+check("图形专用导出 告警挑明「不含语义 PMI」",
+      any("不含任何语义 PMI" in w for w in _go.warnings), True)
+check("导错文件时指出同目录含语义 PMI 的兄弟报告",
+      [os.path.basename(x) for x in _sug],
+      ["nist_ftc_08_asme1_ap242-e2-sfa.xlsx"])
+check("兄弟报告提示写进了装载告警",
+      any("nist_ftc_08_asme1_ap242-e2-sfa.xlsx" in w for w in _go.warnings), True)
+check("兄弟报告提示不误报当前文件",
+      all(os.path.abspath(x) != os.path.abspath(_go_path) for x in _sug), True)
+
+_go_md = """# PMI 提取结果
+
+## MBD_A
+
+- 标注数量：3 条
+
+### 1. ⏥ .03
+
+detailData:
+{
+  "handle": "1233",
+  "name": "Feature Control Frame (1)",
+  "type": "flatness_tolerance"
+}
+
+### 2. B
+
+detailData:
+{
+  "handle": "1235",
+  "datum": "B",
+  "name": "Datum Feature Symbol B (54)",
+  "type": "datum_feature"
+}
+
+### 3. Note (55)
+
+detailData:
+{
+  "handle": "1238",
+  "description": "NOTES (UNLESS OTHERWISE SPECIFIED):",
+  "name": "Note (55)",
+  "property": "semantic text"
+}
+"""
+_go_items, _ = C.parse_dev_markdown_ex(_go_md)
+_go_rows = C.match_items(_go, _go_items)
+_go_m = C.compute_metrics(_go_rows)
+
+check("无真值 开发侧判「⛔ 无可比真值」而非「⚠️ 多余」",
+      [r.status for r in _go_rows if r.kind != C.KIND_NOTE],
+      [C.ST_ABSENT] * 2)
+check("无真值 不产生任何「多余」", _go_m.sem_extra, 0)
+check("无真值 不进语义指标分母", _go_m.sem_expected, 0)
+check("无真值 计入不可比条目", _go_m.no_truth, 2)
+check("无真值 指标标记为不成立", _go_m.truth_missing, True)
+check("无真值 关联路径记为 no-truth",
+      C.link_stats(_go_rows), {"note": 1, "no-truth": 2})
+check("无真值 备注写明不代表提取错误",
+      all("不代表开发侧提取错误" in r.remark for r in _go_rows
+          if r.status == C.ST_ABSENT), True)
+check("无真值 注释类仍按注释处理",
+      [r.status for r in _go_rows if r.kind == C.KIND_NOTE], [C.ST_NOTE])
+check("无真值 汇总标出指标不成立",
+      C.summarize(_go_rows, _go, _go_items)["指标是否成立"],
+      "否（SFA 报告不含语义 PMI）")
+
+# 数量标注位置：SFA 放串首、开发侧可能渲染到串尾，不应判「数量前缀 开发=无」
+_go_codes, _ = C.dev_defects(
+    C.DevItem(title="⌀0.237 +.005 -0.001 2X", name="x",
+              detail={"type": "dimensional_size"}),
+    "2X ⌀0.237  +0.005 -0.001")
+check("数量标注在串尾也能对上（不报 CNT）", _go_codes, [])
+_go_codes2, _ = C.dev_defects(
+    C.DevItem(title="⌀0.237 +.005 -0.001", name="x",
+              detail={"type": "dimensional_size"}),
+    "2X ⌀0.237  +0.005 -0.001")
+check("一侧真的缺数量标注仍要报 CNT", _go_codes2, [C.DF_CNT])
 
 
 # ============================================================

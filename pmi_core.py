@@ -56,6 +56,9 @@ ST_MISS     = "❌ 缺失"
 ST_EXTRA    = "⚠️ 多余"
 ST_GAIN     = "🔷 非语义增益"
 ST_NOTE     = "📝 注释文本"
+# SFA 报告本身不含语义 PMI（图形专用导出，如 NIST 的 `-tg` 变体）：
+# 两侧没有共同真值可比，「多余 / 缺失」无从谈起，必须与 ST_EXTRA 分开。
+ST_ABSENT   = "⛔ 无可比真值"
 
 # 条目类别
 KIND_GT    = "gt"      # 几何公差（FCF）
@@ -67,6 +70,7 @@ KIND_NOTE  = "note"    # 注释 / 标签文本
 LAYER_SEM   = "语义PMI"
 LAYER_DATUM = "基准"
 LAYER_NOTE  = "非语义注释"
+LAYER_NOTRUTH = "不可比"          # SFA 侧无真值，不进任何指标分母
 
 KIND_LAYER = {
     KIND_GT: LAYER_SEM,
@@ -480,7 +484,9 @@ _DIA_CHARS = set("⌀")
 SFA_LAYOUT_GLYPHS = set("▽⎹◁⌮⭩")
 _RAD_PREFIX = re.compile(r"(?<![A-Za-z])R\s*(?=[.\d])")
 _SR_PREFIX = re.compile(r"(?<![A-Za-z])S\s*(?=[⌀.])")
-# 数量前缀可能不在串首（SFA 图形文本形如 `DIM | 4X ⌀.250`），也常用 `×` 而非 `X`
+# 数量标注可能不在串首（SFA 图形文本形如 `DIM | 4X ⌀.250`），也常用 `×` 而非 `X`。
+# 这个「只认串首 / 竖线后」的窄版保留给需要区分位置的场景；
+# 缺陷比对用的是更宽的 `_COUNT_ANY`（见 dev_defects 里的说明）。
 _CNT_PREFIX = re.compile(r"(?:^|\|)\s*(\d+)\s*[Xx×✕](?![0-9A-Za-z])")
 
 
@@ -586,27 +592,31 @@ def dev_defects(it: "DevItem", view: str = "", *, dup: bool = False,
         codes.append(DF_EMPTY)
         notes.append("标注标题为空，无可用文本")
 
-    # 3) 与 SFA 图形通道逐维比对（数量前缀 / 符号 / 数值）
+    # 3) 与 SFA 图形通道逐维比对（数量 / 符号 / 数值）
     if view:
         raw_view = str(view)
-        d_cnt = _CNT_PREFIX.search(fixed)
-        s_cnt = _CNT_PREFIX.search(raw_view)
+        # 数量标注的位置两侧不一致：SFA 放串首（`2X ⌀0.238`），开发侧也可能渲染到
+        # 串尾（`⌀0.237 +.005 -0.001 2X`）。只认前缀会把「已经正确提取、只是位置不同」
+        # 判成「数量前缀 开发=无」——ftc_08 的 3 条假 CNT 就是这么来的。
+        # 改用 `_COUNT_ANY`（允许行首 / 空白 / `|` 之后），两侧对称。
+        d_cnt = _COUNT_ANY.search(fixed)
+        s_cnt = _COUNT_ANY.search(raw_view)
         dv = int(d_cnt.group(1)) if d_cnt else None
         sv = int(s_cnt.group(1)) if s_cnt else None
         if dv != sv:
             codes.append(DF_CNT)
-            notes.append(f"数量前缀 开发={dv if dv else '无'} SFA={sv if sv else '无'}")
+            notes.append(f"数量标注 开发={dv if dv else '无'} SFA={sv if sv else '无'}")
 
         lost = symbols_of(raw_view) - symbols_of(fixed)
         if lost:
             codes.append(DF_SYM)
             notes.append("缺符号 " + " ".join(sorted(lost)))
 
-        # 数量前缀单独由 DF_CNT 负责，这里先从两侧剔除；
+        # 数量标注单独由 DF_CNT 负责，这里先从两侧剔除；
         # 只取带小数点的数值（整数常是 `⌀1` 这类定义区域标注），零值也剔除
         # （`-0` / `-.000` 各通道写法不统一，不足以定性为开发缺陷）
-        dnums = {_absnum(x) for x in _NUM.findall(_CNT_PREFIX.sub("", fixed))}
-        snums = {_absnum(x) for x in _NUM.findall(_CNT_PREFIX.sub("", raw_view))}
+        dnums = {_absnum(x) for x in _NUM.findall(_COUNT_ANY.sub("", fixed))}
+        snums = {_absnum(x) for x in _NUM.findall(_COUNT_ANY.sub("", raw_view))}
         snums = {v for v in snums if _tolerance_like(v)}
         miss = {v for v in snums if not any(_num_equivalent(v, d) for d in dnums)}
         if miss:
@@ -652,6 +662,9 @@ class ColRecipe:
     # 分别指向几何与语义实体）—— 聚合后的组数。装载校验要用它当分母，
     # 否则 46 行 → 20 条会被误判成「列定位错位」。
     n_rows_grouped: int = 0
+    # `n_loaded == 0` 时的解释。装载校验直接引用它，避免把「这张表按设计就产出不了
+    # 条目」误报成「列定位错位」。
+    zero_reason: str = ""
     notes: List[str] = field(default_factory=list)
 
     @property
@@ -720,15 +733,36 @@ def _find_header_row(rows: List[List[str]], aliases: Sequence[str],
 
 def _locate(rows: List[List[str]], aliases: Sequence[str],
             wants: Sequence[str], defaults: Sequence[int]) -> ColRecipe:
-    """定位一张表的列：优先按表头列名，失败则按默认列号回落。"""
+    """定位一张表的列：优先按表头列名，失败才按默认列号回落。
+
+    **表头识别成功时，找不到的列一律记为「不存在」（None），绝不套默认列号。**
+    默认列号是「整表没识别出表头」时的最后手段；表头已经在手还去套默认列号，
+    等于明知列名不对还按位置硬取。ftc_08 的 `-tg` 报告就踩在这里：
+    ta 表只有 12 列、没有 `Associated Semantic PMI`，套默认列号 10 之后
+    读到的其实是 `Saved Views`，于是从 `camera_model_d3 58866 (MBD_A)` 里
+    抠出 116 个假引用 —— 装载条数、表头识别、通道判定三项全绿，
+    只有结果表全红，且原因被伪装成「引用无法解释」。
+
+    例外只有 `id`：SFA 所有表的第一列都是 ID（实测 18 份报告一致），
+    而且它只决定「数据行条数」这一个口径、不参与任何内容取值，
+    所以缺列表头时仍回落 0，但会在 notes 里留痕。
+    """
     hi, hmap = _find_header_row(rows, aliases)
     cr = ColRecipe(header_row=hi, mapping=hmap, n_cols=max((len(r) for r in rows), default=0))
     if hi >= 0:
         for a, d in zip(wants, defaults):
             j = _resolve_col(hmap, a)
-            cr.resolved[a] = d if j is None else j
-            if j is None:
-                cr.notes.append(f"表头未见 `{a}`，按默认列号 {d} 取")
+            if j is not None:
+                cr.resolved[a] = j
+                continue
+            if a == "id":
+                cr.resolved[a] = 0
+                cr.notes.append("表头未见 `id`，按第 1 列取（只影响数据行计数，不参与取值）")
+            else:
+                cr.resolved[a] = None
+                cr.notes.append(
+                    f"表头未见 `{a}`，该列按**不存在**处理"
+                    f"（不套默认列号 {d} —— 位置已变，按位置取会读到别的列）")
     else:
         cr.source = "fallback"
         cr.resolved = {a: d for a, d in zip(wants, defaults)}
@@ -782,6 +816,10 @@ class SfaTruth:
     dc: Dict[int, str] = field(default_factory=dict)                    # draughting_callout.ID -> name
     ta: Dict[str, Dict[str, Any]] = field(default_factory=dict)         # name -> {id, sem_refs, text}
     ta_cols: int = 0                                                    # 关联表实际列数（图形文本通道判定）
+    # ta 表存在、但表头里**没有** `Associated Semantic PMI` 列 —— 说明这份报告只导出了
+    # 图形标注、没导出语义关联（NIST 的 `-tg` 变体就是这样：AP242 只带 tessellated
+    # 图形 PMI、无语义 PMI）。此时代码拿不到任何语义引用，且**不得**按位置硬取别的列。
+    graphic_only: bool = False
     # 图形标注关联通道：`tessellated_annotation_occurrence`（AP242 含 tessellated 呈现）
     # 或 `draughting_model_item_association`（非 tessellated 导出，如 ctc_05-e1）。
     # 两者取其一即可；都缺才算断链。
@@ -806,6 +844,16 @@ class SfaTruth:
 
     def broken_checks(self) -> List["IntegrityCheck"]:
         return [c for c in self.checks if not c.ok]
+
+    @property
+    def truth_missing(self) -> bool:
+        """SFA 侧是否**完全没有**可比真值。
+
+        判据：语义表、datum、datum_feature 三者皆空。正常报告至少会有语义表；
+        三者全空说明这份导出件不含语义 PMI（如 NIST `-tg` 图形专用报告）。
+        此时开发侧的每一条都「无从比对」——不是「多余」。
+        """
+        return not (self.semantic or self.datum or self.datum_feature)
 
 
 # 引用列（ta 的 `Associated Semantic PMI`、dcr 的 `dimension`）的值形如
@@ -846,6 +894,53 @@ def _pick_exact(names: Sequence[str], name: str) -> Optional[str]:
         if n.strip().lower() == low:
             return n
     return None
+
+
+# 同目录同案例的兄弟报告：`nist_ftc_08_asme1_ap242-e1-tg-sfa.xlsx` -> `nist_ftc_08`
+_SIBLING_KEY = re.compile(r"^(nist_[a-z]+_\d+)", re.I)
+
+
+def suggest_reports_with_truth(path: str,
+                               limit: int = 4) -> List[str]:
+    """在报告同目录里找「含语义 PMI」的兄弟报告，供「导错文件」时给出可行替代。
+
+    导错文件是这类 0% 结果的头号原因，而区分两份报告的唯一可靠特征就是
+    有没有 `Semantic PMI Summary` 表。这里只读表名、不解析内容，代价很低；
+    按文件名里的案例号（`nist_ftc_08`）收窄候选，避免把整个目录扫一遍。
+
+    纯提示，不参与任何判定；找不到就返回空列表。
+    """
+    d = os.path.dirname(os.path.abspath(path))
+    m = _SIBLING_KEY.match(os.path.basename(path))
+    if not (d and os.path.isdir(d)):
+        return []
+    key = m.group(1).lower() if m else ""
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    out: List[str] = []
+    for fn in names:
+        if not fn.lower().endswith((".xlsx", ".xlsm")) or fn.startswith("~$"):
+            continue
+        full = os.path.join(d, fn)
+        if os.path.abspath(full) == os.path.abspath(path):
+            continue
+        if key and not fn.lower().startswith(key):
+            continue
+        try:
+            wb = openpyxl.load_workbook(full, read_only=True, data_only=True)
+            try:
+                ok = any("semantic pmi summary" in s.strip().lower() for s in wb.sheetnames)
+            finally:
+                wb.close()
+        except Exception:               # noqa: BLE001
+            continue
+        if ok:
+            out.append(full)
+            if len(out) >= limit:
+                break
+    return out
 
 
 def _cell(r: List[str], j: Optional[int]) -> str:
@@ -939,11 +1034,18 @@ def load_sfa(path: str) -> SfaTruth:
     # 只认 (a) 会让 (b) 的报告整条通道断掉：t.ta 全空 → 开发侧全判「多余」、
     # SFA 侧全判「缺失」，指标 0%，而装载 / 引用 / name 三项交叉校验**全绿**。
     # 实测 18 份 NIST 报告里 17 份有 (a)、ctc_05-e1 只有 (b)。
+    #
+    # 另有第三种形态（ftc_08 `-e1-tg`）：ta 表在，但**表头里没有**
+    # `Associated Semantic PMI` 列 —— 该报告只导出了图形 PMI、没导出语义关联。
+    # 这种表必须当「通道不可用」处理并继续试 (b)，绝不能按默认列号去读别的列
+    # （默认列号 10 落在 `Saved Views` 上，会抠出一堆相机/视图 ID 冒充语义引用）。
     rows, cr = _open_table(wb, t, "ta", "tessellated_annotation_occurren", TA_ALIASES,
                            TA_WANTS, TA_DEFAULT, optional=True)
+    c_ref = col(cr, "associated semantic pmi") if rows is not None else None
+    ta_keyless = rows is not None and c_ref is None
     if rows is not None:
         c_id, c_nm = col(cr, "id"), col(cr, "name")
-        c_ref, c_uni = col(cr, "associated semantic pmi"), col(cr, "equivalent unicode string")
+        c_uni = col(cr, "equivalent unicode string")
         t.ta_cols = cr.n_cols if cr else 0
         for r in rows:
             rid, nm = _cell(r, c_id), _cell(r, c_nm)
@@ -956,20 +1058,36 @@ def load_sfa(path: str) -> SfaTruth:
                 }
         if cr:
             cr.n_loaded = len(t.ta)
-        t.link_channel = LINK_TA
-        if t.ta and not any(v.get("text") for v in t.ta.values()):
+        if not ta_keyless:
+            t.link_channel = LINK_TA
+            if t.ta and not any(v.get("text") for v in t.ta.values()):
+                t.warnings.append(
+                    "tessellated_annotation_occurrence 未提供 `Equivalent Unicode String(s)`"
+                    "（图形文本通道），「SFA图形文本」列将为空，内容比对已回落到语义表文本。"
+                    "如需按图纸上实际呈现的字形比对，请在 SFA 导出时勾选该列。")
+        else:
+            # 表在、行也装载了，但**没有关联键列** —— 该表提供不了任何语义引用。
+            # 保留 t.ta（条目名对诊断仍有价值：可以看出两侧命名体系完全不同），
+            # 但绝不把别的列当关联键读。
+            if cr:
+                cr.notes.append("该表没有 `Associated Semantic PMI` 列，不提供任何语义关联")
             t.warnings.append(
-                "tessellated_annotation_occurrence 未提供 `Equivalent Unicode String(s)`"
-                "（图形文本通道），「SFA图形文本」列将为空，内容比对已回落到语义表文本。"
-                "如需按图纸上实际呈现的字形比对，请在 SFA 导出时勾选该列。")
-    else:
+                f"`{cr.sheet}` 表头里**没有** `Associated Semantic PMI` 列"
+                f"（本表共 {t.ta_cols} 列，表头只有 "
+                + "、".join(f"`{h}`" for h in list(cr.mapping)[:12]) + "）。"
+                "这份导出件只含图形 PMI、不含语义关联 —— 标注 ↔ 语义实体无法建立，"
+                "内容比对不成立。通常是 SFA 导出时只勾了图形 PMI，"
+                "或 STEP 文件本身就是「图形专用」变体（NIST 命名里带 `-tg`）。")
+
+    if rows is None or ta_keyless:
         rows, cr = _open_table(wb, t, "ta", "draughting_model_item_associati",
                                DMIA_ALIASES, DMIA_WANTS, DMIA_DEFAULT, optional=True)
         if rows is None:
-            t.warnings.append(
-                "两种图形标注关联表都没有："
-                "`tessellated_annotation_occurrence` 与 `draughting_model_item_association`，"
-                "标注 ↔ 语义实体无法建立关联（比对结果必然全为多余 / 缺失）")
+            if not ta_keyless:
+                t.warnings.append(
+                    "两种图形标注关联表都没有："
+                    "`tessellated_annotation_occurrence` 与 `draughting_model_item_association`，"
+                    "标注 ↔ 语义实体无法建立关联（比对结果必然全为多余 / 缺失）")
         else:
             c_def, c_item = col(cr, "definition"), col(cr, "identified_item")
             t.ta_cols = cr.n_cols if cr else 0
@@ -985,24 +1103,46 @@ def load_sfa(path: str) -> SfaTruth:
                         rec["refs"].append(x)
                 if raw and raw not in rec["raw"]:
                     rec["raw"].append(raw)
+            added: Dict[str, Dict[str, Any]] = {}
             for hid, rec in agg.items():
                 nm = t.dc.get(hid)
                 if not nm:
                     continue                      # callout 未被 dc 表登记，跳过
-                t.ta[nm] = {
+                added[nm] = {
                     "id": hid, "ta_name": nm,
                     "sem_refs": rec["refs"], "sem_ref_raw": " ; ".join(rec["raw"]),
                     "text": "",                   # 该形态不带图形文本列
                 }
+            t.ta.update(added)
             if cr:
-                cr.n_loaded = len(t.ta)
+                # 只算本表贡献的条数：ta 表（若有）已装载的不能算进这张表的装载率
+                cr.n_loaded = len(added)
                 cr.n_rows_grouped = len(agg)      # 装载校验的分母：分组合数，不是行数
-            t.link_channel = LINK_DMIA
-            t.warnings.append(
-                "该报告没有 `tessellated_annotation_occurrence`，已改用 "
-                "`draughting_model_item_association` 建立关联（等价通道，非错误）。"
-                "代价：缺 `Equivalent Unicode String(s)` 图形文本列，"
-                "内容比对回落到语义表文本，「SFA图形文本」列为空。")
+                if not added:
+                    cr.zero_reason = (
+                        "该报告没有 `draughting_callout` 表，关联表的 `identified_item` "
+                        "指向的是 tessellated 标注本身、而不是 callout，"
+                        "本表按设计产出不了关联条目（不是列定位错位）"
+                        if not t.dc else
+                        "关联表里的 `identified_item` 与 `draughting_callout` 表完全对不上，"
+                        "两张表可能不是同一份数据")
+            if added:
+                t.link_channel = LINK_DMIA
+                t.warnings.append(
+                    "该报告没有可用的 `tessellated_annotation_occurrence` 关联列，已改用 "
+                    "`draughting_model_item_association` 建立关联（等价通道，非错误）。"
+                    "代价：缺 `Equivalent Unicode String(s)` 图形文本列，"
+                    "内容比对回落到语义表文本，「SFA图形文本」列为空。")
+            else:
+                t.warnings.append(
+                    "`draughting_model_item_association` 里的 `identified_item` 指向的 "
+                    + ("对象不是 `draughting_callout`（该报告没有这张表，关联表指向的是 "
+                       "tessellated 标注本身）" if not t.dc
+                       else "callout 未被 `draughting_callout` 表登记")
+                    + "，关联仍无法建立")
+
+    # 只有「ta 缺关联键列、且没有别的通道顶上」才算图形专用导出
+    t.graphic_only = ta_keyless and not t.link_channel
 
     # --- 4. datum：基准标识
     rows, cr = _open_table(wb, t, "datum", "datum", DATUM_ALIASES,
@@ -1067,6 +1207,25 @@ def load_sfa(path: str) -> SfaTruth:
                 break
     wb.close()
 
+    # --- 7. 无真值兜底提示：报告里一条语义 PMI 都没有时，先把话说清楚。
+    # 这是「导错文件」的头号表征 —— 用户手上往往同时有 `-e1-tg`（图形专用）与
+    # `-e2`（含语义）两份导出，随手拖了一份进来就会看到满屏 0%。
+    # 只做提示（不改判定），因为「哪一份才是对的」只有用户知道。
+    if t.truth_missing:
+        alt = suggest_reports_with_truth(path)
+        tip = ("该 SFA 报告不含任何语义 PMI：既没有 `Semantic PMI Summary`，"
+               "也没有 `draughting_callout` / `datum` 可作真值。"
+               "开发侧的条目**无从比对**（不是提取错误），内容级比对不成立。")
+        if alt:
+            tip += ("同目录下这些报告含 `Semantic PMI Summary`，应该才是你要比对的那份："
+                    + "；".join(os.path.basename(x) for x in alt)
+                    + "。若手上还有同一测试件的其它导出（例如不带 `-tg` 的版本），"
+                      "优先换用那一份。")
+        else:
+            tip += ("请换用同一测试件的**语义版**导出（SFA 导出时勾选语义 PMI；"
+                    "NIST 命名里带 `-tg` 的是图形专用变体，不能用）。")
+        t.warnings.append(tip)
+
     _integrity_checks(t)
     return t
 
@@ -1093,7 +1252,7 @@ def _integrity_checks(t: SfaTruth) -> None:
             add(f"{cr.sheet} 装载", False, "表内无可识别的数据行")
         elif cr.n_loaded == 0:
             add(f"{cr.sheet} 装载", False, f"表内 {n_rows} 行、装载 0 条",
-                "整表被跳过：列定位与代码预期不符")
+                cr.zero_reason or "整表被跳过：列定位与代码预期不符")
         elif cr.n_loaded < n_rows * 0.5:
             add(f"{cr.sheet} 装载", False,
                 f"表内 {n_rows} 行、仅装载 {cr.n_loaded} 条", "疑似列定位错位")
@@ -1112,6 +1271,23 @@ def _integrity_checks(t: SfaTruth) -> None:
         "都没找到，标注 ↔ 语义实体无法建立关联"
         if not t.link_channel else "")
 
+    # 关联表在、但**关联键列**不在：通道名看着有，实际一条引用也取不到。
+    # ftc_08 `-e1-tg` 就是这样：表头识别通过、通道判定通过、装载 58 条，
+    # 唯独没有 `Associated Semantic PMI` 列，过去被静默套上默认列号读 `Saved Views`。
+    if t.graphic_only:
+        add("图形标注关联键列", False,
+            f"{t.link_channel or 'tessellated_annotation_occurrence'} 表缺 "
+            f"`Associated Semantic PMI` 列",
+            "列名已识别到位，说明该列确实不存在（不是位置变化）。"
+            "这份导出件只有图形 PMI、没有语义关联，标注 ↔ 语义实体建立不起来")
+
+    # 语义真值：没有语义表就谈不上「语义比对」。以前缺表时不留任何痕迹，
+    # 开发侧每一条都被判「多余」，精确率 0% 却看不出是「没得比」还是「比错了」。
+    if t.truth_missing:
+        add("语义真值", False, "报告不含语义 PMI（无语义表 / datum / datum_feature）",
+            "该 SFA 报告是图形专用导出，SFA 侧没有可比真值；"
+            "开发侧条目标记为「⛔ 无可比真值」而非「多余」，指标不成立")
+
     if t.ta:
         # 引用分五类可落地：直接落语义表 / 经 dcr 映射（尺寸）/ datum_feature（基准）/
         # datum 的 ID-1 邻接（旧版报告）/ 无语义文本的实体表（尺寸·位置）。
@@ -1125,12 +1301,19 @@ def _integrity_checks(t: SfaTruth) -> None:
                 if (r in t.semantic or r in t.dcr_by_dim or r in t.datum_feature
                         or r in t.known_entities or (r - 1) in t.datum):
                     explained += 1
-        ratio = explained / total if total else 1.0
-        add("ta 引用可解释", ratio >= TA_REF_MIN_HIT,
-            f"{explained}/{total} = {ratio:.0%}" if total else "无引用",
-            "有引用既不在语义表、也不在 dcr/datum 索引里，说明该列已不是 "
-            "Associated Semantic PMI，或语义表 ID 体系不同"
-            if total and ratio < TA_REF_MIN_HIT else "")
+        if total == 0:
+            # 有关联表却一条引用都没有：分子分母都为 0 时旧代码算作 100% 通过，
+            # 又是一处「假绿」。正常报告里 ta 表必然带引用。
+            add("ta 引用可解释", False, "0 条引用",
+                "关联表装载了条目却取不到任何引用，说明关联键列缺失或为空，"
+                "关联链实际上是断的")
+        else:
+            ratio = explained / total
+            add("ta 引用可解释", ratio >= TA_REF_MIN_HIT,
+                f"{explained}/{total} = {ratio:.0%}",
+                "有引用既不在语义表、也不在 dcr/datum 索引里，说明该列已不是 "
+                "Associated Semantic PMI，或语义表 ID 体系不同"
+                if ratio < TA_REF_MIN_HIT else "")
 
     if t.dc and t.ta:
         dcn = {v for v in t.dc.values() if v}
@@ -1680,6 +1863,20 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
             rows.append(row)
             continue
 
+        # SFA 侧一条真值都没有（图形专用导出）：判「不可比」，而不是「多余」。
+        # 判「多余」会让精确率显示 0%，把「选错报告」伪装成「开发侧全错提取」——
+        # 这是 ftc_08 `-e1-tg` 的表现。此类条目也不进任何指标分母。
+        if t.truth_missing:
+            row.layer = LAYER_NOTRUTH
+            row.status = ST_ABSENT
+            row.path = "no-truth"
+            row.remark = ((row.remark + " ；" if row.remark else "")
+                          + "该 SFA 报告不含语义 PMI（无语义表 / datum / datum_feature），"
+                            "SFA 侧没有可比真值，本条不可判定 —— 不代表开发侧提取错误。"
+                            "请改用同一测试件的语义版 SFA 报告后重跑。")
+            rows.append(row)
+            continue
+
         sem_ids, path = _lookup_semantic_for_dev(it, t)
         row.path = path
 
@@ -1854,15 +2051,24 @@ class Metrics:
     note_total: int = 0
     note_graphic_only: int = 0
     note_exclusive: int = 0
+    # 「不可比」层：SFA 报告不含语义 PMI 时，开发侧条目全部落到这里。
+    # 不进任何分母 —— 没有真值就没有「召回 / 精确」可言。
+    no_truth: int = 0
     # 开发侧提取缺陷层（与上面各层解耦，不进 recall/precision 分母）
     defect_rows: int = 0
     defect_total: int = 0
     defect_by_code: Dict[str, int] = field(default_factory=dict)
 
     @property
+    def truth_missing(self) -> bool:
+        """整份报告是否「无从比对」——判据来自 match_items 落下的「不可比」行。"""
+        return self.no_truth > 0
+
+    @property
     def defect_rate(self) -> float:
         """有缺陷的开发条目占比（缺陷条目数 / 参与比对的开发条目数）。"""
-        denom = self.sem_extracted + self.datum_expected + self.note_total
+        denom = (self.sem_extracted + self.datum_expected
+                 + self.note_total + self.no_truth)
         return self.defect_rows / denom * 100 if denom else 0.0
 
     @property
@@ -1926,6 +2132,9 @@ def compute_metrics(rows: Sequence[MatchRow], verdicts: Optional[Dict[str, str]]
             m.datum_expected += 1
             if r.status in (ST_HIT, ST_HIT_DIFF):
                 m.datum_hit += 1
+        elif r.layer == LAYER_NOTRUTH:
+            # 无真值：两侧没有共同基准，既不进分子也不进分母。
+            m.no_truth += 1
         else:  # LAYER_NOTE
             m.note_total += 1
             if r.status == ST_NOTE:
@@ -1954,6 +2163,9 @@ def summarize(rows: Sequence[MatchRow], t: SfaTruth, items: Sequence[DevItem]) -
         "开发条目": len(items),
         "SFA语义项": len(t.semantic),
         "SFA表数": len(t.sheets),
+        # 指标是否成立：SFA 侧无真值时三项比率都没有意义，导出里要能看出来
+        "指标是否成立": "否（SFA 报告不含语义 PMI）" if m.truth_missing else "是",
+        "不可比条目": m.no_truth,
         "关联覆盖率": (sum(1 for r in rows if r.path in ("gt-1hop", "dim-2hop", "datum-2hop"))
                    / max(1, len([x for x in items if x.kind != KIND_NOTE])) * 100),
         "关联路径分布": paths,
@@ -1982,13 +2194,14 @@ def summarize(rows: Sequence[MatchRow], t: SfaTruth, items: Sequence[DevItem]) -
 
 
 __all__ = [
-    "ST_HIT", "ST_HIT_DIFF", "ST_SUSPECT", "ST_MISS", "ST_EXTRA", "ST_GAIN", "ST_NOTE",
+    "ST_HIT", "ST_HIT_DIFF", "ST_SUSPECT", "ST_PARTIAL", "ST_MISS", "ST_EXTRA",
+    "ST_GAIN", "ST_NOTE", "ST_ABSENT",
     "KIND_GT", "KIND_DIM", "KIND_DATUM", "KIND_NOTE",
-    "LAYER_SEM", "LAYER_DATUM", "LAYER_NOTE",
+    "LAYER_SEM", "LAYER_DATUM", "LAYER_NOTE", "LAYER_NOTRUTH",
     "DF_ENC", "DF_EMPTY", "DF_CNT", "DF_SYM", "DF_NUM", "DF_MAP", "DF_DUP", "DEFECT_CODES",
     "SfaTruth", "DevItem", "MatchRow", "Metrics",
     "load_sfa", "parse_dev_markdown", "match_items", "compute_metrics", "summarize",
     "normalize", "sem_tokens", "fix_mojibake", "norm_number",
-    "dev_defects", "symbols_of", "datum_target_ident",
+    "dev_defects", "symbols_of", "datum_target_ident", "suggest_reports_with_truth",
     "is_datum_target_entity", "is_known_entity", "classify_sfa_entity",
 ]

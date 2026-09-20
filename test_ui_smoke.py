@@ -27,7 +27,7 @@ PROJ = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJ)
 
 DEFAULT_XLSX = (r"F:\1【机械零件】\Step官方标准数据\NIST-PMI-STEP-Files"
-                r"\nist_ftc_07_asme1_ap242-e2-sfa-1.xlsx")
+                r"\nist_ftc_07_asme1_ap242-e2-sfa.xlsx")
 XLSX = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_XLSX
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -286,6 +286,46 @@ def main():
     at.run()
     check("体检面板 有告警时逐条展示",
           [_w] == [x.value for x in at.warning if x.value == _w], [x.value[:40] for x in at.warning])
+
+    # ---------------- 无真值（图形专用导出） ----------------
+    # 报告不含语义 PMI 时必须显式点破，否则满屏 0% 会被读成「开发侧提取全错」。
+    at.session_state["truth_missing"] = True
+    at.session_state["link_stats"] = {"no-truth": 2, "note": 1}
+    at.session_state["suspected"] = []
+    at.session_state["sfa_warn"] = ["该 SFA 报告不含任何语义 PMI：……"]
+    at.session_state["sfa_checks"] = [
+        {"name": "图形标注关联键列", "ok": False, "value": "缺 `Associated Semantic PMI` 列",
+         "detail": "这份导出件只有图形 PMI、没有语义关联"},
+        {"name": "语义真值", "ok": False, "value": "报告不含语义 PMI", "detail": ""},
+    ]
+    abs_rows = [
+        core.MatchRow(key="MBD_A#1", layer=core.LAYER_NOTRUTH, kind=core.KIND_GT,
+                      group="MBD_A", dev_title="⏥ .03", dev_name="Flatness.1",
+                      status=core.ST_ABSENT, path="no-truth",
+                      remark="该 SFA 报告不含语义 PMI …… 不代表开发侧提取错误。"),
+        core.MatchRow(key="MBD_A#2", layer=core.LAYER_NOTRUTH, kind=core.KIND_DATUM,
+                      group="MBD_A", dev_title="B", dev_name="Simple Datum.1",
+                      status=core.ST_ABSENT, path="no-truth",
+                      remark="该 SFA 报告不含语义 PMI …… 不代表开发侧提取错误。"),
+    ]
+    at.session_state["rows"] = abs_rows
+    at.session_state["verdicts"] = {r.key: "待定" for r in abs_rows}
+    at.session_state["meta"] = {"开发条目": 2, "SFA语义项": 0, "SFA表数": 80, "警告": []}
+    at.run()
+    check("无真值 渲染无异常", not at.exception, [e.value for e in at.exception])
+    check("无真值 体检面板点破「不含语义 PMI」",
+          "不含任何语义 PMI" in _all_text(at), _all_text(at)[:200])
+    check("无真值 结果表点破「选错报告文件」",
+          "选错报告文件" in _all_text(at) or "语义版" in _all_text(at),
+          _all_text(at)[:200])
+    check("无真值 三项指标显示 N/A",
+          sum(1 for m in at.metric if m.value == "N/A") == 3,
+          [m.value for m in at.metric])
+    check("无真值 关联路径标注为不可比",
+          "不可比" in _all_text(at), _all_text(at)[:200])
+    check("无真值 点出不可比条数",
+          any("2" in c.value and "不可比" in c.value for c in at.caption)
+          or "不可比" in _all_text(at), [c.value[:40] for c in at.caption][:8])
 
     print()
     if FAIL:

@@ -457,7 +457,7 @@ import pmi_core as core
 
 _STATE = {"rows": None, "verdicts": {}, "meta": {}, "dev_raw": "",
           "sfa_warn": [], "sfa_stat": "", "sfa_checks": [], "sfa_recipes": [],
-          "suspected": [], "link_stats": {}}
+          "suspected": [], "link_stats": {}, "truth_missing": False}
 for _k, _v in _STATE.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -504,6 +504,7 @@ PATH_LABELS = {
     "datum_feature-1hop": "基准 1 跳（图形 → datum_feature）",
     "datum-2hop": "基准 2 跳（ID 邻接，旧报告兜底）",
     "entity-no-semantic": "尺寸实体存在但无语义值（不进语义分母）",
+    "no-truth": "不可比（SFA 报告不含语义 PMI，无真值）",
     "note": "注释 / 标签类",
     "datum_system": "基准体系",
     "reverse": "SFA 有、开发侧无",
@@ -597,8 +598,11 @@ if st.button("🚀 开始比对", type="primary"):
                 st.session_state.meta = core.summarize(rows, truth, items)
                 st.session_state.dev_raw = raw_now
                 st.session_state.sfa_warn = list(truth.warnings)
+                st.session_state.truth_missing = bool(truth.truth_missing)
                 st.session_state.sfa_stat = (
-                    f"语义表 {len(truth.semantic)} 项 · draughting_callout {len(truth.dc)} 条 · "
+                    f"语义表 {len(truth.semantic)} 项"
+                    + ("（**无真值**）" if truth.truth_missing else "")
+                    + f" · draughting_callout {len(truth.dc)} 条 · "
                     f"图形标注 {len(truth.ta)} 条"
                     f"（{truth.link_channel or '关联表缺失'}） · "
                     f"datum {len(truth.datum)} 项 · dcr {len(truth.dcr_by_dim)} 项"
@@ -608,6 +612,7 @@ if st.button("🚀 开始比对", type="primary"):
                     {"key": cr.key, "sheet": cr.sheet, "header_row": cr.header_row,
                      "source": cr.source, "n_cols": cr.n_cols, "n_rows": cr.n_rows,
                      "n_loaded": cr.n_loaded, "n_rows_grouped": cr.n_rows_grouped,
+                     "zero_reason": cr.zero_reason,
                      "resolved": cr.resolved, "notes": cr.notes}
                     for cr in truth.recipes
                 ]
@@ -672,6 +677,7 @@ _checks = list(st.session_state.get("sfa_checks") or [])
 _recs = list(st.session_state.get("sfa_recipes") or [])
 _linkstats = dict(st.session_state.get("link_stats") or {})
 _suspected = list(st.session_state.get("suspected") or [])
+_truth_missing = bool(st.session_state.get("truth_missing"))
 _bad_checks = [c for c in _checks if not c.get("ok")]
 
 if _sfa_stat or _checks:
@@ -686,6 +692,18 @@ if _sfa_stat or _checks:
                                  f"{len(_bad_checks)} · 装载告警 {len(_sfa_warn)} · "
                                  f"关联断裂 {_linkstats.get('none', 0)} · "
                                  f"疑似对应 {len(_suspected)}"))
+        if _truth_missing:
+            # 无真值是最该被放在最前面的一条：不点破，满屏 0% 会被读成
+            # 「开发侧提取全错」，而真正的原因是拖错了报告文件。
+            st.error(
+                "**这份 SFA 报告不含任何语义 PMI，SFA 侧没有可比真值。**\n\n"
+                "开发侧条目全部记为「⛔ 无可比真值」，既不进召回率也不进精确率 —— "
+                "这不是「开发侧提取全错」，而是**选错了报告文件**。\n\n"
+                "- 典型原因：拿的是「图形专用」导出（NIST 命名里带 `-tg`，"
+                "只有 tessellated 图形 PMI、没有 `Semantic PMI Summary`）。\n"
+                "- 处理：换用同一测试件的**语义版**报告重跑。下方告警里会列出"
+                "同目录下含 `Semantic PMI Summary` 的候选文件。"
+            )
         for _w in _sfa_warn:
             st.warning(_w)
 
@@ -706,7 +724,9 @@ if _sfa_stat or _checks:
                            if r.get("n_rows_grouped") else r["n_rows"]),
                 "装载": r["n_loaded"],
                 "用到的列": " · ".join(f"{k}={v}" for k, v in r["resolved"].items()),
-                "备注": "；".join(r["notes"]),
+                "备注": "；".join(x for x in (
+                    [r.get("zero_reason")] if r["n_loaded"] == 0 and r.get("zero_reason")
+                    else []) + list(r["notes"])),
             } for r in _recs]), hide_index=True, width="stretch")
 
         if _checks:
@@ -761,7 +781,15 @@ if st.session_state.rows:
     st.subheader("📋 详细比对结果")
 
     _dev_rows = [r for r in rows if not r.key.startswith("SFA")]
-    if _dev_rows and all(r.status == core.ST_EXTRA for r in _dev_rows):
+    if _dev_rows and all(r.status == core.ST_ABSENT for r in _dev_rows):
+        st.error(
+            f"开发侧 {len(_dev_rows)} 条全部记为「{core.ST_ABSENT}」"
+            "——**SFA 报告里没有任何语义 PMI 真值**，两边没有共同基准可比。"
+            "这不是提取错误，也不是「多余」：请换用同一测试件的语义版 SFA 报告"
+            "（SFA 导出时勾选语义 PMI；NIST 命名里带 `-tg` 的是图形专用变体）。"
+            "展开「🧭 报告体检」可看到同目录下的候选报告。"
+        )
+    elif _dev_rows and all(r.status == core.ST_EXTRA for r in _dev_rows):
         st.error(
             f"开发侧 {len(_dev_rows)} 条**全部**判为「⚠️ 多余」，同时 SFA 侧大量判为「❌ 缺失」"
             "——这是 **ID 关联链没建立** 的典型特征，而不是两边数据真的对不上。"
@@ -831,14 +859,19 @@ if st.session_state.rows:
         st.subheader("📊 指标总览")
 
         st.caption("① 提取质量（开发侧提取与 SFA 真值的对齐度；非语义项与注释类不进分母）")
+        _na = m.truth_missing
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("语义PMI 召回率", f"{m.recall:.2f}%",
-                  help="几何公差 + 尺寸公差。非语义项不进分母。")
-        c2.metric("语义PMI 精确率", f"{m.precision:.2f}%")
-        c3.metric("基准覆盖率", f"{m.datum_coverage:.2f}%")
+        c1.metric("语义PMI 召回率", "N/A" if _na else f"{m.recall:.2f}%",
+                  help="几何公差 + 尺寸公差。非语义项不进分母。"
+                       + ("　SFA 报告不含语义 PMI，指标不成立。" if _na else ""))
+        c2.metric("语义PMI 精确率", "N/A" if _na else f"{m.precision:.2f}%")
+        c3.metric("基准覆盖率", "N/A" if _na else f"{m.datum_coverage:.2f}%")
         c4.metric("注释类独占提取", m.note_exclusive,
                   help="SFA 语义表与图形通道均无、内部项目能提取到的条目数（内部项目增益）")
         c5.metric("待复核", sum(1 for v in st.session_state.verdicts.values() if v == "待定"))
+        if _na:
+            st.warning(f"SFA 侧无真值：**{m.no_truth}** 条记为「{core.ST_ABSENT}」，"
+                       "三项比率不成立（不是 0%）。换用语义版报告后重跑即可。")
 
         st.caption("② 开发侧提取缺陷（数据本身有问题：乱码 / 丢符号 / 丢数量前缀。"
                    "与 ① 解耦——缺陷不改判定、不进召回率与精确率分母）")
