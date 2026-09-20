@@ -89,7 +89,8 @@ SFA 侧零真值，两侧没有共同基准，「多余 / 缺失」都无从谈�
 - 开发侧条目判 **`⛔ 无可比真值`**（不进任何指标分母），而不是 `⚠️ 多余`；
 - 三项比率显示 **N/A**，不是 0%；
 - 体检面板加 **语义真值** 一项，红字点明「报告不含语义 PMI」；
-- 自动扫描报告同目录，列出含 `Semantic PMI Summary` 的兄弟报告作为替代建议
+- 自动扫描报告同目录（找不到再看环境变量 `PMI_SFA_DIR`），列出含
+  `Semantic PMI Summary` 的兄弟报告作为替代建议
   （实测 `nist_ftc_08_asme1_ap242-e1-tg-sfa.xlsx` → 指出
   `nist_ftc_08_asme1_ap242-e2-sfa.xlsx`）。
 
@@ -347,7 +348,7 @@ PyCharm 中直接运行 `pmi_compare_work.py` 也可以 —— 脚本内置 bare
 pmi_core.py            比对内核：真值装载 / markdown 解析 / 归一化 / ID 关联 / 指标 / 缺陷检测
 pmi_compare_work.py    Streamlit 界面（当前主入口）
 doctor.py              一键诊断：结果不对劲时跑一次，产出完整上下文报告
-test_pmi_core.py       内核回归（259 项：指标口径、关联链路、缺陷检测、解析自检、列名驱动、ID 位数与基准通道、多视图复用、实体名漂移、DMIA 通道、图形专用导出）
+test_pmi_core.py       内核回归（260 项：指标口径、关联链路、缺陷检测、解析自检、列名驱动、ID 位数与基准通道、多视图复用、实体名漂移、DMIA 通道、图形专用导出）
 test_ui_smoke.py       界面冒烟（46 项：AppTest 无头跑渲染分支 + 列口径 + 字段勾选开关 + 两个诊断面板 + 无真值态）
 test_realdata.py       真实数据回归（56 项，锁端到端数值，语料缺失自动跳过）
 samples/               真实语料目录（不进版本控制，见 samples/README.md）

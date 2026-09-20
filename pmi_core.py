@@ -900,46 +900,52 @@ def _pick_exact(names: Sequence[str], name: str) -> Optional[str]:
 _SIBLING_KEY = re.compile(r"^(nist_[a-z]+_\d+)", re.I)
 
 
-def suggest_reports_with_truth(path: str,
-                               limit: int = 4) -> List[str]:
-    """在报告同目录里找「含语义 PMI」的兄弟报告，供「导错文件」时给出可行替代。
+def _has_semantic_sheet(path: str) -> bool:
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception:                   # noqa: BLE001
+        return False
+    try:
+        return any("semantic pmi summary" in s.strip().lower() for s in wb.sheetnames)
+    finally:
+        wb.close()
 
-    导错文件是这类 0% 结果的头号原因，而区分两份报告的唯一可靠特征就是
-    有没有 `Semantic PMI Summary` 表。这里只读表名、不解析内容，代价很低；
+
+def suggest_reports_with_truth(path: str, limit: int = 4) -> List[str]:
+    """找「含语义 PMI」的兄弟报告，供「导错文件」时给出可行替代。
+
+    导错文件是这类 0% 结果的头号原因（图形专用变体没有 `Semantic PMI Summary`），
+    而区分两份报告的唯一可靠特征就是这张表在不在。只读表名、不解析内容，代价很低；
     按文件名里的案例号（`nist_ftc_08`）收窄候选，避免把整个目录扫一遍。
 
+    搜索顺序：报告同目录 → 环境变量 `PMI_SFA_DIR`（NIST 标准件目录常与工作目录分离）。
     纯提示，不参与任何判定；找不到就返回空列表。
     """
-    d = os.path.dirname(os.path.abspath(path))
+    import glob as _glob
+
     m = _SIBLING_KEY.match(os.path.basename(path))
-    if not (d and os.path.isdir(d)):
-        return []
     key = m.group(1).lower() if m else ""
-    try:
-        names = sorted(os.listdir(d))
-    except OSError:
-        return []
+    me = os.path.abspath(path)
+    dirs = [os.path.dirname(me)]
+    env_dir = os.environ.get("PMI_SFA_DIR", "")
+    if env_dir:
+        dirs.append(env_dir)
+
     out: List[str] = []
-    for fn in names:
-        if not fn.lower().endswith((".xlsx", ".xlsm")) or fn.startswith("~$"):
+    for d in dirs:
+        if not (d and os.path.isdir(d)):
             continue
-        full = os.path.join(d, fn)
-        if os.path.abspath(full) == os.path.abspath(path):
-            continue
-        if key and not fn.lower().startswith(key):
-            continue
-        try:
-            wb = openpyxl.load_workbook(full, read_only=True, data_only=True)
-            try:
-                ok = any("semantic pmi summary" in s.strip().lower() for s in wb.sheetnames)
-            finally:
-                wb.close()
-        except Exception:               # noqa: BLE001
-            continue
-        if ok:
-            out.append(full)
-            if len(out) >= limit:
-                break
+        pat = f"{key}*" if key else "*"
+        for full in sorted(_glob.glob(os.path.join(d, pat))):
+            low = os.path.basename(full).lower()
+            if not low.endswith((".xlsx", ".xlsm")) or low.startswith("~$"):
+                continue
+            if os.path.abspath(full) == me or os.path.abspath(full) in out:
+                continue
+            if _has_semantic_sheet(full):
+                out.append(full)
+                if len(out) >= limit:
+                    return out
     return out
 
 

@@ -1471,6 +1471,22 @@ check("兄弟报告提示写进了装载告警",
 check("兄弟报告提示不误报当前文件",
       all(os.path.abspath(x) != os.path.abspath(_go_path) for x in _sug), True)
 
+# 报告与标准件目录不在一起时（用户常把导出件拖到桌面），回落到 PMI_SFA_DIR
+with tempfile.TemporaryDirectory() as _td_a, tempfile.TemporaryDirectory() as _td_b:
+    _go_other = _build_sfa_graphic_only(_td_a)
+    _write_min_semantic(os.path.join(_td_b, "nist_ftc_08_asme1_ap242-e2-sfa.xlsx"))
+    _env_old = os.environ.get("PMI_SFA_DIR")
+    os.environ["PMI_SFA_DIR"] = _td_b
+    try:
+        _sug2 = C.suggest_reports_with_truth(_go_other)
+    finally:
+        if _env_old is None:
+            os.environ.pop("PMI_SFA_DIR", None)
+        else:
+            os.environ["PMI_SFA_DIR"] = _env_old
+check("同目录无候选时回落到 PMI_SFA_DIR",
+      [os.path.basename(x) for x in _sug2], ["nist_ftc_08_asme1_ap242-e2-sfa.xlsx"])
+
 _go_md = """# PMI 提取结果
 
 ## MBD_A
