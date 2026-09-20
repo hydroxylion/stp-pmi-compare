@@ -329,21 +329,16 @@ def main():
                 out(f"  {views:28s} {len(names)} 条："
                     + " ".join(sorted(n for n in names if n)[:6]))
 
-        seen = set()
-        defects = []
-        for r in rows:
-            if not r.defects:
-                continue
-            base = r.key.split("@")[0]
-            if base in seen:
-                continue
-            seen.add(base)
-            defects.append((base, r.dev_title, r.defects, r.defect_detail))
-        if defects:
+        groups = core.defect_groups(rows)
+        if groups:
             out()
-            out(f"提取缺陷清单（{len(defects)} 条）：")
-            for base, title, codes, detail in defects:
-                out(f"  {base:12s} {title[:26]:28s} {' '.join(codes)} | {detail}")
+            out(f"提取缺陷清单（{len(groups)} 条，按开发标注聚合）：")
+            for base, g in groups.items():
+                out(f"  {base:12s} {g['row'].dev_title[:26]:28s}"
+                    f" {' '.join(g['codes'])} | {g['detail']}")
+            if any(core.DF_MRG in g["codes"] for g in groups.values()):
+                out(f"  ↑ {core.DF_MRG} 是唯一需要对照真值的缺陷码"
+                    "（该不该拆成多条要看 SFA）；其余七个只看开发侧即可判定。")
 
         suspects = core.suspect_links(items, t, rows)
         if suspects:

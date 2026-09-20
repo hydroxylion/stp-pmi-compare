@@ -407,6 +407,11 @@ def datum_target_ident(text: str, expect: str = "") -> str:
     return f"{m.group(1)}{m.group(2)}" if m else ""
 
 
+# `compare_tokens` 判定「开发侧把 SFA 的多条复合公差并成一条」时固定的备注前缀。
+# `match_items` 靠它补 `DF_MRG` 缺陷码 —— 两侧共用同一个常量，避免措辞被改后静默失配。
+MRG_REMARK = "ID 关联一致；开发侧多出数值"
+
+
 def compare_tokens(dev: Dict[str, Any], sfa: Dict[str, Any]) -> Tuple[str, str]:
     """返回 (状态, 备注)。
 
@@ -442,10 +447,11 @@ def compare_tokens(dev: Dict[str, Any], sfa: Dict[str, Any]) -> Tuple[str, str]:
     if sn and sn.issubset(dn) and sl.issubset(dl) and dm.issubset(sm) and len(dn) > len(sn):
         # 开发侧把 SFA 拆开的多条复合公差并成了一条（stc_09 的 handle 9010/9792：
         # SFA 拆成 `0.050 A B C` 与 `0.010 A` 两条，开发侧写成一条）。
-        # 口径已定：**以 SFA 的拆分为准**，故这里保持「差异」并点名多出的数值。
+        # 口径已定：**以 SFA 的拆分为准**，故这里保持「差异」并点名多出的数值；
+        # `match_items` 会据 MRG_REMARK 补一条 `DF_MRG` 缺陷码，让它也进缺陷统计。
         extra = "/".join(str(x) for x in sorted(dn - sn))
         return ST_HIT_DIFF, (
-            f"ID 关联一致；开发侧多出数值 {extra}"
+            f"{MRG_REMARK} {extra}"
             "（把 SFA 的多条复合公差合并成一条；以 SFA 拆分口径为准）" + cnt_note)
 
     return ST_SUSPECT, "ID 关联但语义指纹冲突"
@@ -467,8 +473,12 @@ DF_SYM   = "SYM 符号丢失"
 DF_NUM   = "NUM 数值缺失"
 DF_MAP   = "MAP handle/name 不一致"
 DF_DUP   = "DUP handle 重复"
+# 唯一的「对照真值类」缺陷码。上面七个都能只看开发侧得出结论（自检口径）；
+# MRG 不行 —— 「该不该拆成多条」必须拿 SFA 的拆分当标答才判得出来。
+# 由 match_items 在「SFA 拆成多条 + 开发侧数值是超集」时补记，判据见那里的注释。
+DF_MRG   = "MRG 复合公差未拆分"
 
-DEFECT_CODES = (DF_ENC, DF_EMPTY, DF_CNT, DF_SYM, DF_NUM, DF_MAP, DF_DUP)
+DEFECT_CODES = (DF_ENC, DF_EMPTY, DF_CNT, DF_SYM, DF_NUM, DF_MAP, DF_DUP, DF_MRG)
 
 # 符号归一化别名（仅用于缺陷比对，不改变正文归一化口径）
 _SYM_ALIAS = {"⊥": "⟂", "⏊": "⟂", "⊿": "⌓", "⫽": "∥", "⏥": "▱",
@@ -1962,9 +1972,15 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
             continue
 
         # 多条语义实体：逐条比对（复合公差）
+        # SFA 拆成多条本身不是问题（复合公差就该是多条）；开发侧若把它们并成一条，
+        # 由下面的 MRG 判据记缺陷 —— 故这里只留一个前提标记。
+        merged_fcf = len(sem_ids) > 1
         extra_mods = dev_extra_mods(it)
         for sid in sem_ids:
             sub = MatchRow(**{**row.__dict__})
+            # 浅拷贝会让所有子行共享同一个 defects 列表：缺陷必须按子行独立记，
+            # 否则给某条子行补的码会串到同条目其它子行上。
+            sub.defects = list(row.defects)
             sub.key = f"{key}@{sid}"      # 复合公差一条开发标注可能映射多个语义实体
             sub.sfa_sem_id = sid
             if it.kind == KIND_DATUM:
@@ -2041,6 +2057,17 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
                     sub.remark += f"；同一语义实体已被 {used_sem[sid]} 覆盖"
             else:
                 sub.status, sub.remark = compare_tokens(b, a)
+
+            # 开发侧把 SFA 拆开的多条复合公差并成了一条：匹配层保持「差异」
+            # （口径「以 SFA 拆分为准」），缺陷层同时记一条 MRG，让它进缺陷统计。
+            # 双条件缺一不可 —— SFA 只有一条时「数值多出」另有原因，不能定性为未拆分。
+            if merged_fcf and sub.remark.startswith(MRG_REMARK) and DF_MRG not in sub.defects:
+                sub.defects.append(DF_MRG)
+                tip = (f"复合公差未拆分：SFA 拆成 {len(sem_ids)} 条"
+                       f"（{'、'.join(str(x) for x in sem_ids)}），开发侧合并成 1 条")
+                sub.defect_detail = (f"{sub.defect_detail}；{tip}"
+                                     if sub.defect_detail else tip)
+
             used_sem[sid] = key
             used_sem_handle[sid] = it.handle
             rows.append(sub)
@@ -2096,6 +2123,31 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
 # --------------------------------------------------------------------------
 # 指标层
 # --------------------------------------------------------------------------
+def defect_groups(rows: Sequence[MatchRow]) -> Dict[str, Dict[str, Any]]:
+    """按「开发标注」聚合缺陷，供指标层与两处报表（doctor / UI）共用。
+
+    一条开发标注可能映射到多个语义实体（复合公差），比对时被拆成多条子行
+    （`key@sid`）。子行只是「映射到哪个语义实体」的切分，**不是独立条目**，
+    所以缺陷要合并去重后再计数：只取第一条子行会漏掉只出现在后续子行的码 ——
+    `DF_MRG` 恰恰是在每条复合公差子行上才判得出来的那一个。
+
+    返回 {开发条目 key: {"row": 首条子行, "codes": [...], "detail": "..."}}，
+    顺序与 rows 首次出现顺序一致。
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        if not r.defects:
+            continue
+        g = out.setdefault(r.key.split("@")[0], {"row": r, "codes": [], "detail": ""})
+        for c in r.defects:
+            if c not in g["codes"]:
+                g["codes"].append(c)
+        d = r.defect_detail or ""
+        if d and d not in g["detail"]:
+            g["detail"] = f"{g['detail']}；{d}" if g["detail"] else d
+    return out
+
+
 @dataclass
 class Metrics:
     sem_expected: int = 0
@@ -2202,15 +2254,12 @@ def compute_metrics(rows: Sequence[MatchRow], verdicts: Optional[Dict[str, str]]
                 else:
                     m.note_exclusive += 1
 
-    # 缺陷层：按「开发条目」去重（复合公差的多个子行共享同一条开发标注）
-    per_item: Dict[str, List[str]] = {}
-    for r in rows:
-        if r.defects:
-            per_item.setdefault(r.key.split("@")[0], list(r.defects))
-    m.defect_rows = len(per_item)
-    m.defect_total = sum(len(v) for v in per_item.values())
-    for codes in per_item.values():
-        for c in codes:
+    # 缺陷层：按「开发条目」聚合（复合公差的多个子行属同一条开发标注）
+    groups = defect_groups(rows)
+    m.defect_rows = len(groups)
+    m.defect_total = sum(len(g["codes"]) for g in groups.values())
+    for g in groups.values():
+        for c in g["codes"]:
             m.defect_by_code[c] = m.defect_by_code.get(c, 0) + 1
     return m
 
@@ -2257,7 +2306,8 @@ __all__ = [
     "ST_GAIN", "ST_NOTE", "ST_ABSENT",
     "KIND_GT", "KIND_DIM", "KIND_DATUM", "KIND_NOTE",
     "LAYER_SEM", "LAYER_DATUM", "LAYER_NOTE", "LAYER_NOTRUTH",
-    "DF_ENC", "DF_EMPTY", "DF_CNT", "DF_SYM", "DF_NUM", "DF_MAP", "DF_DUP", "DEFECT_CODES",
+    "DF_ENC", "DF_EMPTY", "DF_CNT", "DF_SYM", "DF_NUM", "DF_MAP", "DF_DUP", "DF_MRG",
+    "DEFECT_CODES", "MRG_REMARK", "defect_groups",
     "SfaTruth", "DevItem", "MatchRow", "Metrics",
     "load_sfa", "parse_dev_markdown", "match_items", "compute_metrics", "summarize",
     "normalize", "sem_tokens", "fix_mojibake", "norm_number",

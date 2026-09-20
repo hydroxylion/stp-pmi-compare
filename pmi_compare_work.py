@@ -873,8 +873,8 @@ if st.session_state.rows:
             st.warning(f"SFA 侧无真值：**{m.no_truth}** 条记为「{core.ST_ABSENT}」，"
                        "三项比率不成立（不是 0%）。换用语义版报告后重跑即可。")
 
-        st.caption("② 开发侧提取缺陷（数据本身有问题：乱码 / 丢符号 / 丢数量前缀。"
-                   "与 ① 解耦——缺陷不改判定、不进召回率与精确率分母）")
+        st.caption("② 开发侧提取缺陷（数据本身有问题：乱码 / 丢符号 / 丢数量前缀，"
+                   "以及复合公差该拆未拆。与 ① 解耦——缺陷不改判定、不进召回率与精确率分母）")
         d1, d2, d3, d4 = st.columns(4)
         d1.metric("含缺陷条目", m.defect_rows)
         d2.metric("缺陷总数", m.defect_total)
@@ -884,20 +884,22 @@ if st.session_state.rows:
         if m.defect_by_code:
             st.warning("缺陷分布：" + "　".join(f"**{k}** × {v}"
                                           for k, v in m.defect_by_code.items()))
-            dedup = {}
-            for r in rows:
-                if r.defects:
-                    dedup.setdefault(r.key.split("@")[0], r)
-            with st.expander(f"🔧 提取缺陷清单（{len(dedup)} 条，可直接交回开发侧排查）",
+            _dg = core.defect_groups(rows)
+            _mrg = any(core.DF_MRG in g["codes"] for g in _dg.values())
+            with st.expander(f"🔧 提取缺陷清单（{len(_dg)} 条，可直接交回开发侧排查）",
                              expanded=True):
+                if _mrg:
+                    st.caption(
+                        f"`{core.DF_MRG}` 是唯一需要对照真值的码（该不该拆成多条要看 "
+                        "SFA 的拆分口径）；其余七个只看开发侧即可判定。")
                 st.dataframe(
                     pd.DataFrame([{
-                        "分组": r.group,
-                        "开发名称": r.dev_name,
-                        "开发标注": r.dev_title,
-                        "缺陷": " ".join(r.defects),
-                        "详情": r.defect_detail,
-                    } for k, r in dedup.items()]),
+                        "分组": g["row"].group,
+                        "开发名称": g["row"].dev_name,
+                        "开发标注": g["row"].dev_title,
+                        "缺陷": " ".join(g["codes"]),
+                        "详情": g["detail"],
+                    } for k, g in _dg.items()]),
                     column_config={
                         "分组": st.column_config.TextColumn("分组", width="small"),
                         "开发名称": st.column_config.TextColumn("开发名称", width="small"),

@@ -26,8 +26,11 @@ CASES = [
         "md": "samples/dev_ftc_10.md",
         "xlsx": "nist_ftc_10_asme1_ap242-e2-sfa.xlsx",
         "recall": 100.0, "precision": 100.0, "datum": 100.0,
-        "defects": 6,
-        "defect_codes": {"SYM 符号丢失": 4, "CNT 数量前缀不符": 2},
+        "defects": 9,
+        "defect_codes": {"SYM 符号丢失": 4, "MRG 复合公差未拆分": 3,
+                         "CNT 数量前缀不符": 2},
+        # ftc_10 的 3 条 MRG：`⌓ 1.2 A B C .2 A` 这类复合轮廓度被开发侧并成一条，
+        # 而 SFA 拆成 `1.2 | A B C` 与 `0.2 | A` 两条。
     },
     {
         # CTC 系列：实体 ID 只有 2~3 位（FTC 是 4~7 位），且 datum 与 datum_feature
@@ -57,8 +60,9 @@ CASES = [
         "md": "samples/dev_ftc_08.md",
         "xlsx": "nist_ftc_08_asme1_ap242-e2-sfa.xlsx",
         "recall": 90.7, "precision": 90.7, "datum": 100.0,
-        "defects": 8,
-        "defect_codes": {"NUM 数值缺失": 3, "SYM 符号丢失": 5},
+        "defects": 14,
+        "defect_codes": {"MRG 复合公差未拆分": 6, "SYM 符号丢失": 5,
+                         "NUM 数值缺失": 3},
     },
     {
         # stc_09：18 个标注同时挂在 MBD_A / MBD_A(Work) 两个保存视图下，
@@ -67,12 +71,14 @@ CASES = [
         # 于是产出 12 条「归一化后只差一个空格」的假差异 —— 三项指标明明 100%，
         # 结果表却满屏标黄，观感是「一个都对不上」。
         # 本用例锁死：复用条目照常比对内容，差异数只能剩下有实际原因的 15 条
-        # （7 条 CNT 数量前缀 + 8 条复合公差被开发侧合并）。
+        # （7 条 CNT 数量前缀 + 8 条复合公差子行被开发侧合并）。
+        # 缺陷层锁的是 `MRG` 的**条目**口径 = 4：复合公差的两个子行属同一条开发标注，
+        # 合并去重后按开发标注计数（8 个子行 → 4 条标注）。
         "md": "samples/dev_stc_09.md",
         "xlsx": "nist_stc_09_asme1_ap242-e3-sfa.xlsx",
         "recall": 100.0, "precision": 100.0, "datum": 100.0,
-        "defects": 7,
-        "defect_codes": {"CNT 数量前缀不符": 7},
+        "defects": 11,
+        "defect_codes": {"CNT 数量前缀不符": 7, "MRG 复合公差未拆分": 4},
         "diff": 15,
     },
 ]

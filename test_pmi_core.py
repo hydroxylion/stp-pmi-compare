@@ -246,10 +246,10 @@ else:
     # 四、开发侧提取缺陷层
     # 缺陷=开发侧数据本身错（乱码/丢符号/丢前缀），必须报出且不得影响判定
     # ------------------------------------------------------------
-    defects = {}
-    for r in rows:
-        if r.defects:
-            defects.setdefault(r.key.split("@")[0], (r.defects, r.defect_detail))
+    # 与指标层用同一套聚合（同一开发标注的多个子行合并去重）：
+    # 逐子行取第一条会漏掉「第一子行无码、第二子行才有」的缺陷，
+    # `MRG` 正是这类 —— 它只在数值多出的那些子行上判得出来。
+    defects = {k: (g["codes"], g["detail"]) for k, g in C.defect_groups(rows).items()}
 
     check("缺陷 条目数与指标一致", m.defect_rows, len(defects))
     check("缺陷 ENC 编码损坏条目",
@@ -266,8 +266,20 @@ else:
     check("缺陷 图形通道双行精度差不计入缺陷", "MBD_A#15" in defects, False)
     check("缺陷 无 MAP / DUP 误报",
           [k for k, (c, _) in defects.items() if C.DF_MAP in c or C.DF_DUP in c], [])
-    check("缺陷 分布", m.defect_by_code, {C.DF_CNT: 4, C.DF_SYM: 3, C.DF_ENC: 2})
-    check("缺陷 总数", m.defect_total, 9)
+    # MRG 是唯一的「对照真值类」缺陷码：夹具里这 6 条都是开发侧把 SFA 拆开的
+    # 复合公差（轮廓度 ⌓ / 位置度 ⌖）并成一条，判据是「映射到多个语义实体
+    # 且开发侧数值是超集」——两条缺一不可，缺前者会把「单纯多提一个数值」也算进来。
+    check("缺陷 MRG 复合公差未拆分条目",
+          sorted(k for k, (c, _) in defects.items() if C.DF_MRG in c),
+          ["MBD_B#10", "MBD_B#2", "MBD_B#7", "MBD_C#2", "MBD_D#2", "MBD_D#3"])
+    check("缺陷 MRG 明细点名 SFA 拆分条数",
+          "SFA 拆成 2 条" in defects["MBD_B#2"][1], True)
+    check("缺陷 MRG 条目均映射多个语义实体（判据前提）",
+          sorted(k for k in defects if C.DF_MRG in defects[k][0]
+                 and len([r for r in rows if r.key.split("@")[0] == k]) < 2), [])
+    check("缺陷 分布", m.defect_by_code,
+          {C.DF_CNT: 4, C.DF_MRG: 6, C.DF_SYM: 3, C.DF_ENC: 2})
+    check("缺陷 总数", m.defect_total, 15)
     # 缺陷与分析指标解耦：有缺陷的条目只要内容对得上，仍计入命中
     check("缺陷不拉低指标（缺陷条目仍全命中）",
           [r.key for r in rows if r.defects and r.layer == C.LAYER_SEM
