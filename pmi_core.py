@@ -440,7 +440,13 @@ def compare_tokens(dev: Dict[str, Any], sfa: Dict[str, Any]) -> Tuple[str, str]:
         return ST_HIT_DIFF, "ID 关联一致；开发侧未呈现：" + "/".join(lack) + cnt_note
 
     if sn and sn.issubset(dn) and sl.issubset(dl) and dm.issubset(sm) and len(dn) > len(sn):
-        return ST_HIT_DIFF, "ID 关联一致；开发侧含额外数值（疑似合并多条复合公差）" + cnt_note
+        # 开发侧把 SFA 拆开的多条复合公差并成了一条（stc_09 的 handle 9010/9792：
+        # SFA 拆成 `0.050 A B C` 与 `0.010 A` 两条，开发侧写成一条）。
+        # 口径已定：**以 SFA 的拆分为准**，故这里保持「差异」并点名多出的数值。
+        extra = "/".join(str(x) for x in sorted(dn - sn))
+        return ST_HIT_DIFF, (
+            f"ID 关联一致；开发侧多出数值 {extra}"
+            "（把 SFA 的多条复合公差合并成一条；以 SFA 拆分口径为准）" + cnt_note)
 
     return ST_SUSPECT, "ID 关联但语义指纹冲突"
 
@@ -2018,15 +2024,21 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
             a = sem_tokens(seg, extra_mods)
             b = sem_tokens(it.title, extra_mods)
             if sid in used_sem:
-                sub.status = ST_HIT_DIFF
+                # 复用条目**仍要跑内容比对**。「第二次命中同一个语义 ID」本身
+                # 不是差异信号 —— 开发侧按「视图 × 标注」导出，同一标注在
+                # MBD_A / MBD_A(Work) 天然各出一条，这是 STEP 的合法结构
+                # （SFA 的 ta 表 `Saved Views` 列会同时列出两个视图）。
+                # 旧代码在这里无条件判 ST_HIT_DIFF，导致 stc_09 上 18 个复用标注
+                # 制造出 12 条「归一化后只差一个空格」的假差异，观感是满屏标黄。
+                # 现在改为照常比对内容：一致就保持命中，冲突才降级。
+                sub.status, sub.remark = compare_tokens(b, a)
                 if it.handle and used_sem_handle.get(sid) == it.handle:
-                    # 同一个 handle 再来一条：跨视图是正常复用，同分组内才是重复导出
-                    if row.multiview:
-                        sub.remark = f"同一标注在多视图（{row.multiview}）中重复出现"
-                    else:
-                        sub.remark = f"同一 handle（{it.handle}）重复导出（见缺陷 DUP）"
+                    # 同一个 handle 再来一条：跨视图复用由函数末尾统一追加说明，
+                    # 同分组内才是真·重复导出，这里只补后者
+                    if not row.multiview:
+                        sub.remark += f"；同一 handle（{it.handle}）重复导出（见缺陷 DUP）"
                 else:
-                    sub.remark = f"同一语义实体已被 {used_sem[sid]} 覆盖"
+                    sub.remark += f"；同一语义实体已被 {used_sem[sid]} 覆盖"
             else:
                 sub.status, sub.remark = compare_tokens(b, a)
             used_sem[sid] = key

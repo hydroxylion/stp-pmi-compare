@@ -60,6 +60,21 @@ CASES = [
         "defects": 8,
         "defect_codes": {"NUM 数值缺失": 3, "SYM 符号丢失": 5},
     },
+    {
+        # stc_09：18 个标注同时挂在 MBD_A / MBD_A(Work) 两个保存视图下，
+        # 开发侧按「视图 × 标注」导出必然各出一条。
+        # 旧代码对「第二次命中同一语义 ID」**无条件**判 ⚠️ 文本差异、不比对内容，
+        # 于是产出 12 条「归一化后只差一个空格」的假差异 —— 三项指标明明 100%，
+        # 结果表却满屏标黄，观感是「一个都对不上」。
+        # 本用例锁死：复用条目照常比对内容，差异数只能剩下有实际原因的 15 条
+        # （7 条 CNT 数量前缀 + 8 条复合公差被开发侧合并）。
+        "md": "samples/dev_stc_09.md",
+        "xlsx": "nist_stc_09_asme1_ap242-e3-sfa.xlsx",
+        "recall": 100.0, "precision": 100.0, "datum": 100.0,
+        "defects": 7,
+        "defect_codes": {"CNT 数量前缀不符": 7},
+        "diff": 15,
+    },
 ]
 
 # 图形专用导出：ta 表在，但表头里没有 `Associated Semantic PMI`，整份报告也没有
@@ -241,6 +256,12 @@ def main():
               m.defect_total)
         check(f"{tag} 缺陷分布一致", m.defect_by_code == case["defect_codes"],
               m.defect_by_code)
+
+        # 判定层：差异条数锁死。多视图复用若被误判成差异，数字会明显偏大
+        # （stc_09 是 26 vs 15），这是「复用 ≠ 差异」这道口径的直接闸门。
+        if "diff" in case:
+            n_diff = sum(1 for r in rows if r.status == core.ST_HIT_DIFF)
+            check(f"{tag} 文本差异条数 = {case['diff']}", n_diff == case["diff"], n_diff)
 
         print(f"  状态 {dict((k, sum(1 for r in rows if r.status == k)) for k in set(r.status for r in rows))}")
         print(f"  路径 {paths}")

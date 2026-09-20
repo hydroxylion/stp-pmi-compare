@@ -364,6 +364,11 @@ def main():
             for r in bad_rows[:40]:
                 out(f"  {r.status:16s} {r.key:18s} {r.dev_title[:24]:26s}"
                     f" SFA={r.sfa_text[:30]!r} path={r.path} {' '.join(r.defects)}")
+                # 备注单独一行：这是「为什么判差异」的唯一线索。
+                # 不显示的话，像「开发侧把多条复合公差合并成一条」这类
+                # 判定原因在报告里完全看不见，只剩一个孤零零的 path。
+                if r.remark:
+                    out(f"        └ {r.remark[:110]}")
 
     # ---------------- 输出 ----------------
     dst = args.out or os.path.join(os.getcwd(), "doctor_report.txt")

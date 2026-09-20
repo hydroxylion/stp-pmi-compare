@@ -991,8 +991,12 @@ _mv2.dcr_by_dim[901] = 700
 
 _mv2r = C.match_items(_mv2, _mvi)
 _mv2_remark = {r.key.split("@")[0]: r.remark for r in _mv2r}
-check("多视图 同分组重复的尺寸备注指向 DUP 缺陷",
-      _mv2_remark.get("MBD_A#3", ""), "同一 handle（900）重复导出（见缺陷 DUP）")
+_mv2_status = {r.key.split("@")[0]: r.status for r in _mv2r}
+check("多视图 同分组重复：内容一致仍判命中，备注补 DUP 提示",
+      _mv2_remark.get("MBD_A#3", ""),
+      "ID 关联 + 语义指纹一致；同一 handle（900）重复导出（见缺陷 DUP）")
+check("多视图 同分组重复不因「二次命中」被降级为文本差异",
+      _mv2_status.get("MBD_A#3", ""), C.ST_HIT)
 
 _MV3 = """## MBD_A
 
@@ -1029,8 +1033,12 @@ _mv3.ta["Linear Size.1"] = {"id": 900, "sem_refs": [901], "text": "⌀10 ±.1"}
 _mv3.dcr_by_dim[901] = 700
 _mv3r = C.match_items(_mv3, C.parse_dev_markdown(_MV3))
 _mv3_rem = {r.key.split("@")[0]: r.remark for r in _mv3r}
-check("多视图 跨视图的尺寸备注说明是多视图",
-      _mv3_rem.get("MBD_B#1", ""), "同一标注在多视图（MBD_A、MBD_B）中重复出现")
+_mv3_status = {r.key.split("@")[0]: r.status for r in _mv3r}
+check("多视图 跨视图复用且内容一致 → 判命中（不再无条件标差异）",
+      _mv3_status.get("MBD_B#1", ""), C.ST_HIT)
+check("多视图 跨视图的备注标明是复用而非重复导出",
+      _mv3_rem.get("MBD_B#1", ""),
+      "ID 关联 + 语义指纹一致 ；该标注在多个保存视图中复用（MBD_A、MBD_B），非重复导出")
 check("多视图 跨视图的尺寸不判 DUP",
       [r.key for r in _mv3r if C.DF_DUP in r.defects], [])
 
