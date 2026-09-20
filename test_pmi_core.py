@@ -877,6 +877,162 @@ check("短 ID 场景无断链", _ctc_paths.get("none", 0), 0)
 
 
 # ============================================================
+# 多视图复用 vs 同分组真重复
+#   NIST ctc_02 里基准目标 A1~B4 同时挂在 DRAUGHTING_MODEL MBD_A 与 MBD_B 下
+#   （SFA 的 ta 表 Saved Views 列写作 `(2) camera_model_d3 28 (MBD_A) 29 (MBD_B)`），
+#   开发侧按「视图 × 标注」导出必然出两条 —— 这是合法结构，不能判成提取缺陷。
+#   只有**同一分组内**同一 handle 出现多条才是真重复。
+# ============================================================
+_MV = """## MBD_A
+
+- 标注数量：3 条
+
+### 1. A1
+
+detailData:
+{
+  "handle": "1167",
+  "name": "Datum Target.1",
+  "type": "datum_feature",
+  "datum": "A",
+  "target id": "1",
+  "original_type_name": "draughting_callout"
+}
+
+### 2. Ø10 ±.1
+
+detailData:
+{
+  "handle": "900",
+  "name": "Linear Size.1",
+  "type": "dimensional_size",
+  "original_type_name": "draughting_callout"
+}
+
+### 3. Ø10 ±.1
+
+detailData:
+{
+  "handle": "900",
+  "name": "Linear Size.1",
+  "type": "dimensional_size",
+  "original_type_name": "draughting_callout"
+}
+
+## MBD_B
+
+- 标注数量：1 条
+
+### 1. A1
+
+detailData:
+{
+  "handle": "1167",
+  "name": "Datum Target.1",
+  "type": "datum_feature",
+  "datum": "A",
+  "target id": "1",
+  "original_type_name": "draughting_callout"
+}
+"""
+
+_mvi, _mvd = C.parse_dev_markdown_ex(_MV)
+check("多视图 解析到两个分组", _mvd.groups, ["MBD_A", "MBD_B"])
+check("多视图 条目数", len(_mvi), 4)
+
+_mvt = C.SfaTruth()
+_mvt.semantic[500] = {"entity": "datum_target", "text": "A1 (point)",
+                      "kind": C.KIND_DATUM}
+_mvt.ta["Datum Target.1"] = {"id": 1028, "sem_refs": [500], "text": "A1"}
+_mvt.dc[1167] = "Datum Target.1"
+
+_mvr = C.match_items(_mvt, _mvi)
+_mv_by_key = {}
+for _r in _mvr:
+    # 带语义命中的条目 key 会是 `MBD_A#1@500`（复合公差拆行），这里按开发条目归并
+    _mv_by_key.setdefault(_r.key.split("@")[0], _r)
+
+check("多视图 跨视图复用不判 DUP",
+      [r.key for r in _mvr if C.DF_DUP in r.defects], ["MBD_A#2", "MBD_A#3"])
+check("多视图 两种视图都标出复用了哪些分组",
+      (_mv_by_key["MBD_A#1"].multiview, _mv_by_key["MBD_B#1"].multiview),
+      ("MBD_A、MBD_B", "MBD_A、MBD_B"))
+check("多视图 跨视图条目备注给出说明",
+      "多个保存视图中复用" in _mv_by_key["MBD_B#1"].remark, True)
+check("多视图 跨视图条目仍判命中",
+      _mv_by_key["MBD_B#1"].status, C.ST_HIT)
+check("多视图 同分组重复的明细指明分组",
+      "同一分组（MBD_A）内出现 2 条" in _mv_by_key["MBD_A#2"].defect_detail, True)
+check("多视图 同分组重复不算多视图", _mv_by_key["MBD_A#2"].multiview, "")
+check("多视图 同分组重复不算多视图（第三条）", _mv_by_key["MBD_A#3"].multiview, "")
+
+_mvm = C.compute_metrics(_mvr)
+check("多视图 重复不计入缺陷率分母以外的额外项",
+      _mvm.defect_by_code.get(C.DF_DUP), 2)
+check("多视图 跨视图复用只算一条基准（不按视图数翻倍）", _mvm.datum_expected, 1)
+check("多视图 基准覆盖率仍 100%", round(_mvm.datum_coverage, 2), 100.00)
+
+# 回归：单分组、无重复时不得出现 DUP / 多视图标记
+_solo = C.parse_dev_markdown(_MV.split("## MBD_B")[0])[:1]
+_solo_r = C.match_items(_mvt, _solo)
+check("多视图 单条标注不产生 DUP/多视图",
+      [(r.key.split("@")[0], r.defects, r.multiview) for r in _solo_r],
+      [("MBD_A#1", [], "")])
+
+# 尺寸类（GT/DIM）走的是「同一语义实体被覆盖」分支，也要区分两种重复
+_mv2 = C.SfaTruth()
+_mv2.semantic[700] = {"entity": "dimensional_characteristic_representation",
+                      "text": "⌀10 ±.1", "kind": C.KIND_DIM}
+_mv2.ta["Linear Size.1"] = {"id": 900, "sem_refs": [901], "text": "⌀10 ±.1"}
+_mv2.dcr_by_dim[901] = 700
+
+_mv2r = C.match_items(_mv2, _mvi)
+_mv2_remark = {r.key.split("@")[0]: r.remark for r in _mv2r}
+check("多视图 同分组重复的尺寸备注指向 DUP 缺陷",
+      _mv2_remark.get("MBD_A#3", ""), "同一 handle（900）重复导出（见缺陷 DUP）")
+
+_MV3 = """## MBD_A
+
+- 标注数量：1 条
+
+### 1. Ø10 ±.1
+
+detailData:
+{
+  "handle": "900",
+  "name": "Linear Size.1",
+  "type": "dimensional_size",
+  "original_type_name": "draughting_callout"
+}
+
+## MBD_B
+
+- 标注数量：1 条
+
+### 1. Ø10 ±.1
+
+detailData:
+{
+  "handle": "900",
+  "name": "Linear Size.1",
+  "type": "dimensional_size",
+  "original_type_name": "draughting_callout"
+}
+"""
+_mv3 = C.SfaTruth()
+_mv3.semantic[700] = {"entity": "dimensional_characteristic_representation",
+                      "text": "⌀10 ±.1", "kind": C.KIND_DIM}
+_mv3.ta["Linear Size.1"] = {"id": 900, "sem_refs": [901], "text": "⌀10 ±.1"}
+_mv3.dcr_by_dim[901] = 700
+_mv3r = C.match_items(_mv3, C.parse_dev_markdown(_MV3))
+_mv3_rem = {r.key.split("@")[0]: r.remark for r in _mv3r}
+check("多视图 跨视图的尺寸备注说明是多视图",
+      _mv3_rem.get("MBD_B#1", ""), "同一标注在多视图（MBD_A、MBD_B）中重复出现")
+check("多视图 跨视图的尺寸不判 DUP",
+      [r.key for r in _mv3r if C.DF_DUP in r.defects], [])
+
+
+# ============================================================
 # 汇总
 # ============================================================
 for f in FAIL:

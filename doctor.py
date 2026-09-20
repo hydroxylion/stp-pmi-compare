@@ -234,6 +234,20 @@ def main():
         out(f"  缺陷: 条目 {m.defect_rows} / 总数 {m.defect_total}"
             f" / 占比 {m.defect_rate:.2f}% {m.defect_by_code}")
 
+        # 多视图复用：一条 STEP 标注挂多个保存视图，开发侧会导出多条。
+        # 这不是缺陷（DUP 已按分组收窄），单列出来避免和真重复混淆。
+        mv = {}
+        for r in rows:
+            if r.multiview:
+                mv.setdefault(r.multiview, set()).add(r.dev_name or r.dev_title)
+        if mv:
+            out()
+            out(f"多视图复用标注（{sum(len(v) for v in mv.values())} 个标注，"
+                f"每个在下列视图各占一条记录；非缺陷、不影响指标）：")
+            for views, names in sorted(mv.items()):
+                out(f"  {views:28s} {len(names)} 条："
+                    + " ".join(sorted(n for n in names if n)[:6]))
+
         seen = set()
         defects = []
         for r in rows:

@@ -477,10 +477,12 @@ def symbols_of(text: str) -> set:
 
 
 def dev_defects(it: "DevItem", view: str = "", *, dup: bool = False,
-                sfa_name: str = "") -> Tuple[List[str], str]:
+                dup_count: int = 0, sfa_name: str = "") -> Tuple[List[str], str]:
     """检测单条开发标注的提取缺陷。
 
     `view` 为 SFA 侧对应条目的可呈现文本（优先图形通道，缺则语义通道）。
+    `dup` 只在本条**所属分组内**同一 handle 出现多条时为真 —— 跨分组的重复是
+    「同一条 STEP 标注被多个保存视图共用」，属合法结构，另由 MatchRow.multiview 提示。
     返回 (缺陷码列表, 人类可读说明)。缺陷只报不改，不影响匹配判定。
     """
     codes: List[str] = []
@@ -532,10 +534,13 @@ def dev_defects(it: "DevItem", view: str = "", *, dup: bool = False,
         codes.append(DF_MAP)
         notes.append(f"handle 指向 {sfa_name!r}，标注写的是 {it.name!r}")
 
-    # 5) 重复 handle
+    # 5) 重复 handle：只认「同一分组内」重复。
+    #    跨分组重复（同一 handle 出现在 MBD_A 与 MBD_B）是 SFA 里一条标注挂多个
+    #    保存视图的正常结构，开发者按「视图 × 标注」导出必然出多条，不是缺陷。
     if dup and it.handle:
         codes.append(DF_DUP)
-        notes.append(f"handle {it.handle} 在同一次比对中出现多条")
+        notes.append(f"handle {it.handle} 在同一分组（{it.group or '-'}）内出现 "
+                     f"{dup_count or 2} 条")
 
     return codes, "；".join(notes)
 
@@ -1236,6 +1241,9 @@ class MatchRow:
     path: str = ""        # 关联路径：gt-1hop / dim-2hop / datum-2hop / none
     defects: List[str] = field(default_factory=list)   # 开发侧提取缺陷码
     defect_detail: str = ""
+    # 该 handle 出现的分组列表（>1 个即「同一标注被多个保存视图共用」）。
+    # 这是 STEP 的合法结构，只做提示：不进缺陷层、不影响任何指标。
+    multiview: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -1254,6 +1262,7 @@ class MatchRow:
             "提取缺陷": " ".join(self.defects),
             "缺陷详情": self.defect_detail,
             "关联路径": self.path,
+            "多视图": self.multiview,
             "人工校验": "待定",
             "备注": self.remark,
         }
@@ -1436,15 +1445,25 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
     """按实体 ID 精确关联，产出比对行。"""
     rows: List[MatchRow] = []
     used_sem: Dict[int, int] = {}   # 语义 ID -> 覆盖它的开发条目序号
+    used_sem_handle: Dict[int, Optional[int]] = {}   # 语义 ID -> 覆盖它的开发条目 handle
 
     if not items:
         return rows
 
-    # 按 handle 建索引，便于检测重复
-    by_handle: Dict[int, List[DevItem]] = {}
+    # 按 (分组, handle) 建索引：只有同一分组内重复出现才是真·重复导出。
+    # 跨分组重复是「同一条 STEP 标注被多个保存视图共用」—— 例如 NIST ctc_02 里
+    # 基准目标 A1~B4 同时挂在 DRAUGHTING_MODEL MBD_A 与 MBD_B 下（SFA 的 ta 表
+    # `Saved Views` 列会写成 `(2) camera_model_d3 28 (MBD_A) 29 (MBD_B)`），
+    # 开发侧按「视图 × 标注」导出必然出两条。这是合法结构，不是缺陷。
+    by_handle_group: Dict[Tuple[str, int], List[DevItem]] = {}
+    groups_of_handle: Dict[int, List[str]] = {}
     for it in items:
-        if it.handle:
-            by_handle.setdefault(it.handle, []).append(it)
+        if not it.handle:
+            continue
+        by_handle_group.setdefault((it.group, it.handle), []).append(it)
+        gs = groups_of_handle.setdefault(it.handle, [])
+        if it.group not in gs:
+            gs.append(it.group)
 
     for idx, it in enumerate(items, start=1):
         key = f"{it.group}#{it.seq}"
@@ -1452,6 +1471,9 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
             key=key, layer=KIND_LAYER.get(it.kind, LAYER_NOTE), kind=it.kind,
             group=it.group, dev_title=it.title, dev_name=it.name, handle=it.handle,
         )
+        mv = groups_of_handle.get(it.handle or -1) or []
+        if len(mv) > 1:
+            row.multiview = "、".join(mv)
         ta = t.ta.get(it.name)
         row.sfa_graphic_text = normalize(ta["text"]) if ta else ""
 
@@ -1459,7 +1481,8 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
         # view 优先用图形通道（图纸上实际呈现的文字），缺则回落语义通道
         sfa_name = t.dc.get(it.handle) if it.handle else ""
         view = it_view(it, t)
-        codes, detail = dev_defects(it, view, dup=len(by_handle.get(it.handle or -1, [])) > 1,
+        dup_n = len(by_handle_group.get((it.group, it.handle or -1), []))
+        codes, detail = dev_defects(it, view, dup=dup_n > 1, dup_count=dup_n,
                                     sfa_name=sfa_name or "")
         row.defects, row.defect_detail = codes, detail
 
@@ -1558,10 +1581,18 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
             b = sem_tokens(it.title, extra_mods)
             if sid in used_sem:
                 sub.status = ST_HIT_DIFF
-                sub.remark = f"同一语义实体已被 {used_sem[sid]} 覆盖"
+                if it.handle and used_sem_handle.get(sid) == it.handle:
+                    # 同一个 handle 再来一条：跨视图是正常复用，同分组内才是重复导出
+                    if row.multiview:
+                        sub.remark = f"同一标注在多视图（{row.multiview}）中重复出现"
+                    else:
+                        sub.remark = f"同一 handle（{it.handle}）重复导出（见缺陷 DUP）"
+                else:
+                    sub.remark = f"同一语义实体已被 {used_sem[sid]} 覆盖"
             else:
                 sub.status, sub.remark = compare_tokens(b, a)
             used_sem[sid] = key
+            used_sem_handle[sid] = it.handle
             rows.append(sub)
 
     # 反向：datum 表有、开发侧无
@@ -1601,6 +1632,14 @@ def match_items(t: SfaTruth, items: Sequence[DevItem]) -> List[MatchRow]:
             status=ST_MISS, path="reverse",
             remark="SFA 语义表有，开发侧未提取",
         ))
+
+    # 多视图复用标记（最后统一追加，避免被中途的 remark 赋值覆盖）。
+    # 只提示、不进缺陷层、不影响指标：这是 SFA 里一条标注挂多个保存视图的合法结构。
+    for r in rows:
+        if not r.multiview or "多视图" in r.remark:
+            continue
+        tag = f"该标注在多个保存视图中复用（{r.multiview}），非重复导出"
+        r.remark = f"{r.remark} ；{tag}" if r.remark else tag
     return rows
 
 
@@ -1654,6 +1693,7 @@ def compute_metrics(rows: Sequence[MatchRow], verdicts: Optional[Dict[str, str]]
     """
     v = verdicts or {}
     m = Metrics()
+    seen_datum: set = set()
     for i, r in enumerate(rows):
         verdict = v.get(r.key, "待定")
         if r.layer == LAYER_SEM:
@@ -1683,6 +1723,12 @@ def compute_metrics(rows: Sequence[MatchRow], verdicts: Optional[Dict[str, str]]
         elif r.layer == LAYER_DATUM:
             if r.kind == "datum_system":
                 continue
+            # 同一条标注跨视图重复导出只算一次：否则「基准_应提取」会按视图数翻倍
+            # （ctc_02 的 8 个基准目标会算成 16），覆盖率虽然不变，数字会误导。
+            dk = f"handle:{r.handle}" if r.handle else r.key
+            if dk in seen_datum:
+                continue
+            seen_datum.add(dk)
             m.datum_expected += 1
             if r.status in (ST_HIT, ST_HIT_DIFF):
                 m.datum_hit += 1

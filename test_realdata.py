@@ -13,6 +13,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import openpyxl
 import pmi_core as core              # noqa: E402
 
 SFA_DIR = os.environ.get(
@@ -42,6 +43,44 @@ CASES = [
 
 FAIL = []
 TOTAL = 0
+
+
+# 多视图复用用例：开发侧导出粒度是「保存视图 × 标注」，一条 annotation 挂在几个
+# 视图下就会导出几条（handle 相同）。NIST ctc_02 的基准目标正好挂在 MBD_A + MBD_B，
+# 早期实现按 handle 一刀切判 DUP，会凭空报出 16 条「重复」缺陷。
+MULTIVIEW_CASES = [
+    {
+        "xlsx": "nist_ctc_02_asme1_ap242-e2-sfa.xlsx",
+        "annotations": ["Datum Target.1", "Datum Target.2", "Datum Target.3",
+                        "Datum Target.4", "Datum Target.5", "Datum Target.6",
+                        "Datum Target.7", "Datum Target.8"],
+        "views": "MBD_A、MBD_B",
+    },
+]
+
+
+def _multiview_probe(xlsx: str, t):
+    """按 SFA 的 `Saved Views` 列反推「开发侧按视图导出」，返回 (条目, 比对行)。"""
+    import re
+    wb = openpyxl.load_workbook(xlsx, read_only=True, data_only=True)
+    sname = core._pick_sheet(wb.sheetnames, "tessellated_annotation_occurren")
+    rows = core._rows(wb[sname])
+    hi, hdr = next((i, r) for i, r in enumerate(rows)
+                   if any(c.startswith("Saved Views") for c in r))
+    i_name = hdr.index("name")
+    i_view = next(i for i, c in enumerate(hdr) if c.startswith("Saved Views"))
+    name2id = {v: k for k, v in t.dc.items()}
+
+    items, seq = [], {}
+    for r in rows[hi + 1:]:
+        nm = r[i_name]
+        if not nm or nm not in name2id:
+            continue
+        for g in (re.findall(r"\((MBD_[A-Z]+)\)", r[i_view]) or ["MBD_A"]):
+            seq[g] = seq.get(g, 0) + 1
+            items.append(core.DevItem(group=g, seq=seq[g], title=nm,
+                                      handle=name2id[nm], name=nm))
+    return items, core.match_items(t, items)
 
 
 def check(name, cond, got=""):
@@ -108,6 +147,36 @@ def main():
 
         print(f"  状态 {dict((k, sum(1 for r in rows if r.status == k)) for k in set(r.status for r in rows))}")
         print(f"  路径 {paths}")
+        print()
+
+    # ---- 多视图复用：跨视图重复不是缺陷，不能报 DUP ----
+    for mc in MULTIVIEW_CASES:
+        xlp = os.path.join(SFA_DIR, mc["xlsx"])
+        tag = mc["xlsx"].replace("-sfa.xlsx", "")
+        print(f"=== {tag}（多视图复用）===")
+        if not os.path.exists(xlp):
+            print(f"  跳过：SFA 报告不存在 {xlp}（可用 PMI_SFA_DIR 指定目录）")
+            continue
+        ran += 1
+
+        t = core.load_sfa(xlp)
+        items, mrows = _multiview_probe(xlp, t)
+        dup = sorted({r.key for r in mrows if core.DF_DUP in r.defects})
+        mv_names = sorted({r.dev_name for r in mrows if r.multiview})
+        mv_views = sorted({r.multiview for r in mrows if r.multiview})
+
+        check(f"{tag} 跨视图复用不报 DUP", not dup, dup[:8])
+        check(f"{tag} 多视图标注名单一致", mv_names == mc["annotations"], mv_names)
+        check(f"{tag} 多视图分组一致", mv_views == [mc["views"]], mv_views)
+        check(f"{tag} 多视图记录判定一致（同一标注不因视图而变）",
+              all(len({r.status for r in mrows if r.dev_name == nm}) == 1
+                  for nm in mc["annotations"]),
+              {nm: sorted({r.status for r in mrows if r.dev_name == nm})
+               for nm in mc["annotations"]})
+        check(f"{tag} 缺陷层不被多视图记录污染",
+              not any(r.defects for r in mrows if r.dev_name in mc["annotations"]),
+              [r.key for r in mrows if r.dev_name in mc["annotations"] and r.defects])
+        print(f"  条目 {len(items)} 条 → 多视图标记 {len(mv_names)} 个标注")
         print()
 
     print()

@@ -472,7 +472,7 @@ VIEW_COLS = [
 # 诊断列：Handle / 实体 ID / 类型 / 关联路径等，只在溯源时按需打开
 DIAG_COLS = [
     "关联键", "分组", "Handle", "SFA语义ID", "SFA实体类型",
-    "层级", "类别", "缺陷详情", "关联路径",
+    "层级", "类别", "缺陷详情", "关联路径", "多视图",
 ]
 # 列宽（未列出的按 small）
 COL_WIDTH = {
@@ -485,7 +485,8 @@ COL_WIDTH = {
 }
 # 缺陷码释义（表格提示用）
 DEFECT_LEGEND = ("`ENC` 编码损坏 · `CNT` 数量前缀不符 · `SYM` 符号丢失 · `NUM` 数值缺失 · "
-                 "`EMP` 标题为空 · `MAP` handle-name 不一致 · `DUP` handle 重复")
+                 "`EMP` 标题为空 · `MAP` handle-name 不一致 · "
+                 "`DUP` handle 在**同一分组内**重复（跨视图复用不算缺陷）")
 
 # 关联路径的中文释义。key 与 pmi_core._lookup_semantic_for_dev 的返回值一一对应；
 # 出现字典外的 key 直接原样显示 —— 宁可显示英文，也不要静默吞掉。
