@@ -56,9 +56,51 @@ def rare_chars(t):
     return cnt
 
 
+def prompt_paths():
+    """无参数启动时的交互引导（双击 `诊断.bat` 的场景）。
+
+    提示文案刻意放在 Python 里而不是 .bat 里：批处理文件受「控制台代码页」
+    与「换行符」双重影响，中文容易乱码、`if (...)` 块还可能在 LF 换行下
+    整块解析错位（表现为每行都报「不是内部或外部命令」）。
+    让 bat 只剩几行纯 ASCII，把中文与交互交回 Python，是唯一稳的做法。
+    """
+    print()
+    print("=" * 72)
+    print("PMI 比对诊断 —— 三种用法，任选一种")
+    print("=" * 72)
+    print("  1. 把 SFA 报告的 xlsx 拖到「诊断.bat」上")
+    print("  2. 把 xlsx 和 markdown 两个文件一起选中，拖到「诊断.bat」上")
+    print("  3. 直接在这里粘贴路径")
+    print()
+    print("路径含空格、中文或括号时不用自己加引号，直接粘即可。")
+    print()
+
+    def ask(label, required=True):
+        while True:
+            try:
+                raw = input(f"{label}：")
+            except EOFError:
+                return ""
+            raw = raw.strip().strip('"').strip("'").strip()
+            if not raw:
+                if required:
+                    print("  ↑ 这项必填，请把 xlsx 路径粘贴进来。")
+                    continue
+                return ""
+            if os.path.exists(raw):
+                return raw
+            print(f"  ↑ 找不到这个文件：{raw}")
+
+    xlsx = ask("SFA 报告 xlsx 路径")
+    if not xlsx:
+        return "", ""
+    md = ask("开发 markdown 路径（没有就直接回车）", required=False)
+    return xlsx, md
+
+
 def main():
     ap = argparse.ArgumentParser(description="SFA 报告 + 开发 markdown 一键诊断")
-    ap.add_argument("xlsx", help="SFA 导出的 xlsx 报告")
+    ap.add_argument("xlsx", nargs="?", default="", help="SFA 导出的 xlsx 报告")
     ap.add_argument("md", nargs="?", default="", help="开发侧 markdown（可选）")
     ap.add_argument("-o", "--out", default="", help="诊断报告输出路径")
     args = ap.parse_args()
@@ -68,8 +110,28 @@ def main():
     except Exception:               # noqa: BLE001
         pass
 
-    if not os.path.exists(args.xlsx):
-        print(f"找不到 SFA 报告：{args.xlsx}")
+    # 拖拽两个文件到 诊断.bat 时顺序不定：按扩展名认哪个是开发侧 markdown，
+    # 而不是假设用户先拖 xlsx。逻辑放这里而不是 bat，bat 才能保持纯 ASCII 极简。
+    _md_ext = re.compile(r"\.(md|txt|json)$", re.I)
+    _given = [p for p in (args.xlsx, args.md) if p]
+    xlsx = next((p for p in _given if not _md_ext.search(p)), "")
+    md = next((p for p in _given if _md_ext.search(p)), "")
+    if _given and not xlsx:
+        print("只拿到 markdown，没有 SFA 报告的 xlsx。请把 xlsx 一起拖进来，或直接粘贴其路径。")
+        return 2
+
+    if not xlsx:
+        try:
+            xlsx, md = prompt_paths()
+        except (KeyboardInterrupt, EOFError):
+            print("\n已取消。")
+            return 1
+        if not xlsx:
+            print("\n没有拿到 xlsx 路径，已退出。")
+            return 1
+
+    if not os.path.exists(xlsx):
+        print(f"找不到 SFA 报告：{xlsx}")
         return 2
 
     L = []
@@ -95,11 +157,11 @@ def main():
             out(f"{mod:11s}: {getattr(m, '__version__', '?')}")
         except Exception:           # noqa: BLE001
             out(f"{mod:11s}: 未安装")
-    out(f"SFA 报告   : {args.xlsx}")
-    out(f"开发 markdown: {args.md or '（未提供，跳过比对相关章节）'}")
+    out(f"SFA 报告   : {xlsx}")
+    out(f"开发 markdown: {md or '（未提供，跳过比对相关章节）'}")
 
     # ---------------- 1. 原始表结构 ----------------
-    wb = openpyxl.load_workbook(args.xlsx, read_only=True, data_only=True)
+    wb = openpyxl.load_workbook(xlsx, read_only=True, data_only=True)
     sheets = list(wb.sheetnames)
     head("1. 工作表清单")
     out(f"共 {len(sheets)} 张表")
@@ -107,7 +169,7 @@ def main():
         out(f"  {i:3d}. {n}")
 
     # ---------------- 2. 装载与列定位 ----------------
-    t = core.load_sfa(args.xlsx)
+    t = core.load_sfa(xlsx)
 
     head("2. 关键表结构与列定位")
     out("说明：列位置一律按表头列名定位。来源显示 [fallback] 表示没识别出表头，")
@@ -186,13 +248,13 @@ def main():
 
     # ---------------- 7. 开发 markdown ----------------
     head("7. 开发 markdown 解析")
-    if not args.md:
+    if not md:
         out("  （未提供 markdown，跳过）")
         out("  提示：提供 markdown 后可一并输出解析自检、关联路径分布与三项指标。")
-    elif not os.path.exists(args.md):
-        out(f"  找不到 markdown：{args.md}")
+    elif not os.path.exists(md):
+        out(f"  找不到 markdown：{md}")
     else:
-        raw = open(args.md, encoding="utf-8", errors="replace").read()
+        raw = open(md, encoding="utf-8", errors="replace").read()
         items, diag = core.parse_dev_markdown_ex(raw)
         out(f"  文件大小 {len(raw)} 字符 / {len(raw.splitlines())} 行")
         out(f"  解析条目      : {diag.items}")

@@ -1,0 +1,10 @@
+# 批处理必须 CRLF：cmd.exe 遇到 LF 换行时，含 if (...) / for 块的批处理会整块
+# 错位解析，表现为「每一行都报不是内部或外部命令」。详见 README「诊断入口」。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 其余按仓库默认
+*.py text
+*.md text
+*.txt text

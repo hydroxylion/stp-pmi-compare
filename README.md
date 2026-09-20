@@ -77,9 +77,24 @@ md.name    ==  SFA.draughting_callout.name == SFA.tessellated_annotation_occurre
 | 只拖 **SFA 报告的 xlsx** | 诊断 SFA 侧（装载、列定位、交叉校验、未收录字符） |
 | 同时选中 **xlsx + 开发 markdown** 一起拖 | 完整诊断，含关联路径分布与比对指标 |
 
-两个文件顺序随便，脚本会按扩展名自动认。也可以在 `诊断.bat` 双击后按提示粘贴路径。
+两个文件顺序随便，按扩展名自动认（`.md`/`.txt`/`.json` 视为开发侧）。
+也可以双击 `诊断.bat`，按屏幕提示粘贴路径 —— 提示与交互都由 `doctor.py` 打印。
 
 跑完在本目录生成 **`doctor_report.txt`** —— 结果不对时把这个文件发出来即可。
+
+> **`诊断.bat` 为什么只有 8 行**
+>
+> 批处理文件踩过一次坑：写成 LF 换行 + UTF-8 中文时，cmd.exe 会把含
+> `if (...)` / `for` 的块整块错位解析，屏幕上每一行都报「不是内部或外部命令」，
+> 完全跑不起来。所以现在的约定是：
+>
+> - `诊断.bat` 保持**纯 ASCII、无分支语句**，只负责 `cd` 到脚本目录并调用 `doctor.py`；
+>   **所有中文提示、参数顺序识别、交互式询问都在 Python 里做**（`doctor.prompt_paths`）。
+> - `*.bat` / `*.ps1` 的换行由 `.gitattributes` 钉死为 **CRLF**（`eol=crlf`），
+>   避免再被写成 LF。
+> - `启动工具.bat` 因为要显示中文，保持 UTF-8 + `chcp 65001`，但换行同样是 CRLF。
+>
+> 改这两个 bat 时别用会写 LF 的编辑器直接覆盖，改完用 `cat -A 诊断.bat` 确认行尾是 `^M$`。
 
 ### 或者用命令行
 
@@ -279,8 +294,9 @@ test_pmi_core.py       内核回归（216 项：指标口径、关联链路、�
 test_ui_smoke.py       界面冒烟（40 项：AppTest 无头跑渲染分支 + 列口径 + 字段勾选开关 + 两个诊断面板）
 test_realdata.py       真实数据回归（28 项，锁端到端数值，语料缺失自动跳过）
 samples/               真实语料目录（不进版本控制，见 samples/README.md）
-诊断.bat               拖入 xlsx / xlsx+md 即跑 doctor.py，不用记命令行
-启动工具.bat           双击启动界面
+诊断.bat               纯 ASCII + CRLF：拖入 xlsx / xlsx+md 即跑 doctor.py
+启动工具.bat           双击启动界面（UTF-8 + chcp 65001，CRLF）
+.gitattributes         批处理换行钉死为 CRLF（LF 会让 cmd 整块解析错位）
 streamlit_launcher.py  启动器（规避 IDE 运行配置序列化差异）
 pmi_compare.py         早期版本，留档
 ```
